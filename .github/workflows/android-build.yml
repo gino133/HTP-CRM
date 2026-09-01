@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+
   workflow_dispatch:
 
 permissions:
@@ -15,53 +16,89 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Lấy source code
+      # ==========================================
+      # 1. Checkout source code
+      # ==========================================
       - name: Checkout source
         uses: actions/checkout@v4
 
-      # 2. Cài Node.js
+      # ==========================================
+      # 2. Node.js 22
+      # Capacitor 8 requires Node.js >= 22
+      # ==========================================
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
-      # 3. Cài Java cho Android Gradle
+      # ==========================================
+      # 3. Java 21
+      # ==========================================
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 21
 
-      # 4. Cài dependencies
+      # ==========================================
+      # 4. Check versions
+      # ==========================================
+      - name: Check environment
+        run: |
+          echo "Node version:"
+          node --version
+
+          echo "NPM version:"
+          npm --version
+
+          echo "Java version:"
+          java -version
+
+      # ==========================================
+      # 5. Install dependencies
+      # ==========================================
       - name: Install dependencies
         run: npm ci
 
-      # 5. Build React/Vite
+      # ==========================================
+      # 6. Build Vite application
+      # ==========================================
       - name: Build web application
         run: npm run build
 
-      # 6. Đồng bộ web app vào Android
+      # ==========================================
+      # 7. Sync Capacitor
+      # ==========================================
       - name: Sync Capacitor Android
         run: npx cap sync android
 
-      # 7. Cấp quyền chạy Gradle
+      # ==========================================
+      # 8. Give Gradle permission
+      # ==========================================
       - name: Make Gradle executable
         run: chmod +x android/gradlew
 
-      # 8. Build APK Debug
+      # ==========================================
+      # 9. Build Android Debug APK
+      # ==========================================
       - name: Build Debug APK
         working-directory: android
         run: ./gradlew assembleDebug --stacktrace
 
-      # 9. Đổi tên APK cho dễ nhận biết
-      - name: Rename APK
+      # ==========================================
+      # 10. Prepare APK
+      # ==========================================
+      - name: Prepare APK
         run: |
           mkdir -p release
+
           cp android/app/build/outputs/apk/debug/app-debug.apk \
              release/HTP-CRM-debug.apk
 
-      # 10. Upload APK lên GitHub Actions
+      # ==========================================
+      # 11. Upload APK to GitHub
+      # ==========================================
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
