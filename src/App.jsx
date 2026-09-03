@@ -3,7 +3,7 @@ import {
   Home, Users, Package, FileText, BarChart3, Plus, X, ChevronRight,
   ChevronLeft, Search, Trash2, Pencil, ArrowLeft, TrendingUp, TrendingDown,
   Check, Phone, Mail, MapPin, Building2, Lock, Minus, ListChecks, CheckCircle2,
-  Circle, Clock, Repeat, CalendarDays, Send, Copy, Settings, Sun, Moon, Smartphone
+  Circle, Clock, Repeat, CalendarDays, Send, Copy, Settings, Sun, Moon, Smartphone, Bell
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid
@@ -77,6 +77,70 @@ const getStatusMeta = (key) => ({
 })[key];
 
 const uid = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4);
+
+/* ---------------------------------- THÔNG BÁO NHẮC VIỆC (chỉ hoạt động trong app thật, không phải bản xem trước) ----------------------------------
+   Truy cập qua window.Capacitor để KHÔNG cần import trực tiếp @capacitor/local-notifications ở đây
+   (import trực tiếp sẽ làm hỏng bản xem trước trong Claude, vì thư viện đó không tồn tại ở đó).
+   Trong app thật, main.jsx đã import gói này 1 lần để đăng ký plugin, nên window.Capacitor.Plugins.LocalNotifications sẽ có sẵn. */
+const getLocalNotif = () => (typeof window !== "undefined" ? window.Capacitor?.Plugins?.LocalNotifications : null);
+
+async function requestNotifPermission() {
+  try {
+    const LN = getLocalNotif();
+    if (!LN) return;
+    await LN.requestPermissions();
+  } catch (e) {}
+}
+
+async function cancelTaskNotification(task) {
+  try {
+    const LN = getLocalNotif();
+    if (!LN || !task?.notifId) return;
+    await LN.cancel({ notifications: [{ id: task.notifId }] });
+  } catch (e) {}
+}
+
+// Đặt (hoặc đặt lại) lịch thông báo cho 1 công việc. Trả về notifId để lưu lại vào task.
+async function scheduleTaskNotification(task) {
+  const LN = getLocalNotif();
+  if (!LN) return task?.notifId || null; // Không phải app thật (vd: đang xem trong Claude) -> bỏ qua
+  try {
+    const notifId = task.notifId || Math.floor(Math.random() * 2000000000);
+    if (task.notifId) {
+      await LN.cancel({ notifications: [{ id: task.notifId }] }).catch(() => {});
+    }
+    if (!task.time) return null; // không đặt giờ -> không nhắc, huỷ hẳn lịch cũ (trả về null)
+
+    const [hh, mm] = task.time.split(":").map(Number);
+
+    if (task.type === "daily") {
+      await LN.schedule({
+        notifications: [{
+          id: notifId,
+          title: "⏰ Nhắc việc hằng ngày",
+          body: task.title,
+          schedule: { on: { hour: hh, minute: mm }, repeats: true, allowWhileIdle: true },
+        }],
+      });
+    } else {
+      const [y, m, d] = (task.date || isoDay(new Date())).split("-").map(Number);
+      const when = new Date(y, m - 1, d, hh, mm, 0);
+      if (when.getTime() <= Date.now()) return null; // giờ đã qua -> không đặt lịch
+      await LN.schedule({
+        notifications: [{
+          id: notifId,
+          title: "⏰ Nhắc công việc",
+          body: task.title,
+          schedule: { at: when, allowWhileIdle: true },
+        }],
+      });
+    }
+    return notifId;
+  } catch (e) {
+    return task?.notifId || null;
+  }
+}
+
 const money = (n) => (Math.round(n || 0)).toLocaleString("vi-VN") + "đ";
 const todayISO = () => new Date().toISOString();
 const monthLabel = (d) => {
@@ -371,6 +435,15 @@ export default function PersonalCRM() {
       setThemeMode(d.themeMode);
       setAccentTone(d.accentTone);
       setLoaded(true);
+      requestNotifPermission(); // Xin quyền gửi thông báo (chỉ có tác dụng khi chạy app thật)
+      // Tự đặt lịch cho các công việc đã có giờ nhắc nhưng chưa từng được đặt lịch (vd: tạo trước khi có tính năng này)
+      (d.tasks || []).forEach((t) => {
+        if (t.time && !t.notifId && !t.done) {
+          scheduleTaskNotification(t).then((notifId) => {
+            if (notifId) setTasks((prev) => prev.map((x) => (x.id === t.id ? { ...x, notifId } : x)));
+          });
+        }
+      });
     });
   }, []);
 
@@ -474,14 +547,33 @@ export default function PersonalCRM() {
       return exists ? prev.map((x) => (x.id === t.id ? t : x)) : [...prev, t];
     });
   };
-  const deleteTask = (id) => setTasks((prev) => prev.filter((x) => x.id !== id));
+  // Dùng khi lưu từ màn hình Thêm/Sửa công việc - có đặt/đặt lại lịch thông báo thật
+  const saveTaskWithNotification = async (t) => {
+    const notifId = await scheduleTaskNotification(t);
+    upsertTask({ ...t, notifId });
+  };
+  const deleteTask = (id) => {
+    const task = tasks.find((x) => x.id === id);
+    if (task) cancelTaskNotification(task);
+    setTasks((prev) => prev.filter((x) => x.id !== id));
+  };
   const toggleTaskDone = (task, dayIso) => {
     if (task.type === "daily") {
       const set = new Set(task.completedDates || []);
       set.has(dayIso) ? set.delete(dayIso) : set.add(dayIso);
       upsertTask({ ...task, completedDates: Array.from(set) });
     } else {
-      upsertTask({ ...task, done: !task.done });
+      const nowDone = !task.done;
+      if (nowDone) {
+        // Đã xong -> huỷ nhắc, không cần nhắc việc đã hoàn thành nữa
+        cancelTaskNotification(task);
+        upsertTask({ ...task, done: true, notifId: null });
+      } else {
+        // Bỏ đánh dấu xong -> đặt lại nhắc nếu còn hợp lệ
+        scheduleTaskNotification(task).then((notifId) => {
+          upsertTask({ ...task, done: false, notifId });
+        });
+      }
     }
   };
 
@@ -644,9 +736,11 @@ export default function PersonalCRM() {
         height: "100dvh",
         maxWidth: 560,
         margin: "0 auto",
+        overflowX: "hidden",
+        touchAction: "pan-y",
       }}
     >
-      <div className="relative w-full h-full overflow-hidden" style={{ backgroundColor: C.bg }}>
+      <div className="relative w-full h-full overflow-hidden" style={{ backgroundColor: C.bg, overflowX: "hidden", touchAction: "pan-y" }}>
         {/* Khoảng đệm an toàn phía trên (tai thỏ/status bar thật của điện thoại) */}
         <div style={{ height: "env(safe-area-inset-top, 0px)" }} />
 
@@ -786,7 +880,7 @@ export default function PersonalCRM() {
 
             <Screen
               open={screenOpen && screen?.type === "quoteForm"}
-              title={screen?.quote ? "Sửa báo giá" : "Báo giá mới"}
+              title={screen?.type === "quoteForm" && screen?.quote ? "Sửa báo giá" : "Báo giá mới"}
               onBack={() => closeScreen()}
             >
               {screen?.type === "quoteForm" && (
@@ -807,7 +901,7 @@ export default function PersonalCRM() {
 
             <Screen
               open={screenOpen && screen?.type === "productForm"}
-              title={screen?.data ? "Sửa sản phẩm" : "Thêm sản phẩm"}
+              title={screen?.type === "productForm" && screen?.data ? "Sửa sản phẩm" : "Thêm sản phẩm"}
               onBack={() => closeScreen()}
             >
               {screen?.type === "productForm" && (
@@ -827,7 +921,7 @@ export default function PersonalCRM() {
 
             <Screen
               open={screenOpen && screen?.type === "taskForm"}
-              title={screen?.data ? "Sửa công việc" : "Công việc mới"}
+              title={screen?.type === "taskForm" && screen?.data ? "Sửa công việc" : "Công việc mới"}
               onBack={() => closeScreen()}
             >
               {screen?.type === "taskForm" && (
@@ -839,7 +933,7 @@ export default function PersonalCRM() {
                       presetDate={screen.presetDate}
                       onCancel={() => closeScreen()}
                       onDelete={screen.data ? (id) => { deleteTask(id); closeScreen(); showToast("Đã xoá công việc"); } : null}
-                      onSave={(t) => { upsertTask(t); closeScreen(); showToast("Đã lưu công việc"); }}
+                      onSave={(t) => { saveTaskWithNotification(t); closeScreen(); showToast("Đã lưu công việc"); }}
                     />
                   </ErrorBoundary>
                 </div>
@@ -1928,6 +2022,12 @@ function TaskForm({ existing, presetDate, onSave, onCancel, onDelete }) {
       <Field label={type === "daily" ? "Giờ nhắc mỗi ngày (không bắt buộc)" : "Giờ nhắc (không bắt buộc)"}>
         <TextInput type="time" value={time} onChange={(e) => setTime(e.target.value)} />
       </Field>
+      {time && (
+        <div className="text-[11px] mb-4 -mt-2 flex items-center gap-1.5" style={{ color: C.sub }}>
+          <Bell size={11} />
+          Đến giờ, app sẽ gửi thông báo đẩy kèm âm thanh (chỉ hoạt động trên app đã cài, không có trong bản xem trước)
+        </div>
+      )}
       <Field label="Ghi chú"><TextArea rows={3} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Chi tiết công việc..." /></Field>
 
       <button onClick={submit} className="w-full py-3 rounded-2xl font-bold text-white text-sm mb-2" style={{ backgroundColor: C.navy }}>Lưu công việc</button>
