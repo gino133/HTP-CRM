@@ -2,5 +2,7 @@
 	"appId": "com.htp.crm",
 	"appName": "HTP CRM",
 	"webDir": "dist",
-	"packageClassList": []
+	"packageClassList": [
+		"LocalNotificationsPlugin"
+	]
 }
