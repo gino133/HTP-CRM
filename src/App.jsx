@@ -265,7 +265,7 @@ const getInputStyle = () => ({
   border: `1px solid ${C.border}`,
   borderRadius: "12px",
   padding: "10px 12px",
-  fontSize: "14px",
+  fontSize: "16px",
   color: C.text,
   outline: "none",
   backgroundColor: C.inputBg,
@@ -391,6 +391,24 @@ export default function PersonalCRM() {
   // Ghi đè trực tiếp lên object màu dùng chung C - áp dụng ngay trong lượt render này cho toàn bộ app
   Object.assign(C, computeColors(effectiveMode, accentTone));
 
+  // Ép cuộn trang về đúng vị trí gốc — chống lỗi Android WebView tự cuộn lệch cả
+  // trang sang trái/phải khi input trong khung đang trượt (transform) được focus/blur.
+  // withBlur=true (khi ĐÓNG khung) còn bỏ focus khỏi input đang mở để bàn phím tắt gọn gàng
+  // và không để lại lệch cuộn; khi MỞ khung thì không blur để không phá autoFocus hợp lệ khác.
+  const resetScrollGuard = (withBlur) => {
+    const reset = () => {
+      window.scrollTo(0, 0);
+      document.documentElement.scrollLeft = 0;
+      document.body.scrollLeft = 0;
+      if (withBlur && document.activeElement && document.activeElement !== document.body) {
+        document.activeElement.blur();
+      }
+    };
+    reset();
+    requestAnimationFrame(reset);
+    setTimeout(reset, 350);
+  };
+
   const [sheet, setSheetRaw] = useState(null); // {type:'customerForm'|'productForm'|'taskForm', data}
   const [sheetOpen, setSheetOpen] = useState(false);
   const [screen, setScreenRaw] = useState(null); // {type:'quoteForm'|'quoteDetail'|'customerDetail'|'reports', ...}
@@ -404,21 +422,27 @@ export default function PersonalCRM() {
     if (sheetTimer.current) clearTimeout(sheetTimer.current);
     setSheetRaw(payload);
     setSheetOpen(true);
+    resetScrollGuard(false);
   };
   const closeSheet = () => {
     setSheetOpen(false);
     if (sheetTimer.current) clearTimeout(sheetTimer.current);
     sheetTimer.current = setTimeout(() => setSheetRaw(null), 320);
+    resetScrollGuard(true);
   };
   const openScreen = (payload) => {
     if (screenTimer.current) clearTimeout(screenTimer.current);
     setScreenRaw(payload);
     setScreenOpen(true);
+    // Phòng vệ: một số bản Android WebView tự cuộn lệch cả trang khi input trong khung
+    // trượt (transform) được focus. Ép trang về đúng vị trí gốc mỗi lần mở/đóng khung.
+    resetScrollGuard(false);
   };
   const closeScreen = () => {
     setScreenOpen(false);
     if (screenTimer.current) clearTimeout(screenTimer.current);
     screenTimer.current = setTimeout(() => setScreenRaw(null), 320);
+    resetScrollGuard(true);
   };
   // Chuyển tab: luôn đóng hết khung/sheet đang mở trước, tránh lớp nền mờ (backdrop) của khung cũ
   // che mất thao tác ở tab mới.
@@ -2001,7 +2025,7 @@ function TaskForm({ existing, presetDate, onSave, onCancel, onDelete }) {
 
   return (
     <div>
-      <Field label="Tên công việc *"><TextInput value={title} onChange={(e) => setTitle(e.target.value)} placeholder="VD: Gọi lại khách hàng ABC" autoFocus /></Field>
+      <Field label="Tên công việc *"><TextInput value={title} onChange={(e) => setTitle(e.target.value)} placeholder="VD: Gọi lại khách hàng ABC" /></Field>
 
       <Field label="Loại">
         <div className="flex gap-2">
