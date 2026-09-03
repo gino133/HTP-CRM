@@ -1,0 +1,55 @@
+name: Build Android APK
+
+# Tự chạy mỗi khi push lên nhánh main.
+# Cũng có thể bấm chạy tay: vào tab "Actions" trên GitHub -> chọn workflow này -> "Run workflow"
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Lấy code từ repo
+        uses: actions/checkout@v4
+
+      - name: Cài Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Cài Java (bắt buộc để chạy Gradle build Android)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Cache Gradle (build sau nhanh hơn nhiều)
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Cài dependencies
+        run: npm install
+
+      - name: Build web app (Vite)
+        run: npm run build
+
+      - name: Đồng bộ vào project Android (Capacitor)
+        run: npx cap sync android
+
+      - name: Build file APK
+        # Bản "debug" được Android tự ký sẵn (debug keystore có sẵn trong máy ảo CI)
+        # -> cài thẳng lên điện thoại được ngay, không cần tạo/khai báo chứng chỉ gì cả.
+        # Phù hợp cho mục đích dùng cá nhân. Muốn nộp lên Google Play mới cần bản ký release riêng.
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Đưa file APK lên để tải về
+        uses: actions/upload-artifact@v4
+        with:
+          name: HTP-CRM-android
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
