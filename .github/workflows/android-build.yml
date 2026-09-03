@@ -17,7 +17,7 @@ jobs:
       - name: Cài Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Cài Java (bắt buộc để chạy Gradle build Android)
