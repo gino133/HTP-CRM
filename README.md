@@ -70,3 +70,13 @@ ios/                  → project native iOS (mở bằng Xcode, cần Mac)
 resources/            → ảnh gốc để sinh icon/splash
 capacitor.config.ts   → cấu hình tên app, App ID
 ```
+
+
+## Thông báo nhắc việc (mới)
+App đã tích hợp thông báo đẩy thật (kèm âm thanh mặc định của điện thoại) cho mục **Công việc** — khi đặt "Giờ nhắc" cho 1 việc, đến đúng giờ điện thoại sẽ báo dù app đang tắt/khoá màn hình.
+
+**Lưu ý quan trọng:**
+- Chỉ hoạt động trên **app đã cài thật** (qua `npm run android` / `npm run ios`) — **không hoạt động** khi xem trong bản preview của Claude, vì đó chỉ là trang web thường.
+- Lần đầu mở app, điện thoại sẽ hỏi xin quyền gửi thông báo — cần bấm **Cho phép/Allow**, nếu không thông báo sẽ không gửi được.
+- Android 13 trở lên: nếu lỡ từ chối quyền, vào **Cài đặt điện thoại → Ứng dụng → HTP CRM → Thông báo** để bật lại thủ công.
+- iOS: tương tự, vào **Cài đặt → HTP CRM → Thông báo** để bật/tắt.
