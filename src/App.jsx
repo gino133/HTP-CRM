@@ -265,7 +265,7 @@ const getInputStyle = () => ({
   border: `1px solid ${C.border}`,
   borderRadius: "12px",
   padding: "10px 12px",
-  fontSize: "16px",
+  fontSize: "14px",
   color: C.text,
   outline: "none",
   backgroundColor: C.inputBg,
@@ -391,24 +391,6 @@ export default function PersonalCRM() {
   // Ghi đè trực tiếp lên object màu dùng chung C - áp dụng ngay trong lượt render này cho toàn bộ app
   Object.assign(C, computeColors(effectiveMode, accentTone));
 
-  // Ép cuộn trang về đúng vị trí gốc — chống lỗi Android WebView tự cuộn lệch cả
-  // trang sang trái/phải khi input trong khung đang trượt (transform) được focus/blur.
-  // withBlur=true (khi ĐÓNG khung) còn bỏ focus khỏi input đang mở để bàn phím tắt gọn gàng
-  // và không để lại lệch cuộn; khi MỞ khung thì không blur để không phá autoFocus hợp lệ khác.
-  const resetScrollGuard = (withBlur) => {
-    const reset = () => {
-      window.scrollTo(0, 0);
-      document.documentElement.scrollLeft = 0;
-      document.body.scrollLeft = 0;
-      if (withBlur && document.activeElement && document.activeElement !== document.body) {
-        document.activeElement.blur();
-      }
-    };
-    reset();
-    requestAnimationFrame(reset);
-    setTimeout(reset, 350);
-  };
-
   const [sheet, setSheetRaw] = useState(null); // {type:'customerForm'|'productForm'|'taskForm', data}
   const [sheetOpen, setSheetOpen] = useState(false);
   const [screen, setScreenRaw] = useState(null); // {type:'quoteForm'|'quoteDetail'|'customerDetail'|'reports', ...}
@@ -422,27 +404,21 @@ export default function PersonalCRM() {
     if (sheetTimer.current) clearTimeout(sheetTimer.current);
     setSheetRaw(payload);
     setSheetOpen(true);
-    resetScrollGuard(false);
   };
   const closeSheet = () => {
     setSheetOpen(false);
     if (sheetTimer.current) clearTimeout(sheetTimer.current);
     sheetTimer.current = setTimeout(() => setSheetRaw(null), 320);
-    resetScrollGuard(true);
   };
   const openScreen = (payload) => {
     if (screenTimer.current) clearTimeout(screenTimer.current);
     setScreenRaw(payload);
     setScreenOpen(true);
-    // Phòng vệ: một số bản Android WebView tự cuộn lệch cả trang khi input trong khung
-    // trượt (transform) được focus. Ép trang về đúng vị trí gốc mỗi lần mở/đóng khung.
-    resetScrollGuard(false);
   };
   const closeScreen = () => {
     setScreenOpen(false);
     if (screenTimer.current) clearTimeout(screenTimer.current);
     screenTimer.current = setTimeout(() => setScreenRaw(null), 320);
-    resetScrollGuard(true);
   };
   // Chuyển tab: luôn đóng hết khung/sheet đang mở trước, tránh lớp nền mờ (backdrop) của khung cũ
   // che mất thao tác ở tab mới.
@@ -1181,9 +1157,21 @@ function CustomersTab({ customers, custRevenue, onAdd, onOpen }) {
                   <div className="text-xs mt-0.5" style={{ color: C.sub }}>{c.phone || "Chưa có SĐT"}</div>
                 </div>
               </div>
-              <div className="text-right flex-shrink-0 pl-2">
-                <div className="text-xs font-bold" style={{ color: C.green }}>{money(custRevenue(c.id))}</div>
-                <ChevronRight size={16} color={C.sub} />
+              <div className="flex items-center gap-2 flex-shrink-0 pl-2">
+                {c.phone && (
+                  <a
+                    href={`tel:${c.phone}`}
+                    onClick={(e) => e.stopPropagation()}
+                    className="w-8 h-8 rounded-full flex items-center justify-center"
+                    style={{ backgroundColor: C.greenBg }}
+                  >
+                    <Phone size={13} color={C.green} />
+                  </a>
+                )}
+                <div className="text-right">
+                  <div className="text-xs font-bold" style={{ color: C.green }}>{money(custRevenue(c.id))}</div>
+                  <ChevronRight size={16} color={C.sub} />
+                </div>
               </div>
             </div>
           ))}
@@ -1200,14 +1188,18 @@ function CustomerForm({ existing, existingGroups, onSave, onCancel }) {
   const [address, setAddress] = useState(existing?.address || "");
   const [group, setGroup] = useState(existing?.group || "");
   const [note, setNote] = useState(existing?.note || "");
+  const [error, setError] = useState("");
   const submit = () => {
-    if (!name.trim()) return;
-    onSave({ id: existing?.id || uid(), name: name.trim(), phone, email, address, group: group.trim(), note });
+    if (!name.trim()) { setError("Vui lòng nhập tên khách hàng"); return; }
+    if (!phone.trim()) { setError("Vui lòng nhập số điện thoại"); return; }
+    setError("");
+    onSave({ id: existing?.id || uid(), name: name.trim(), phone: phone.trim(), email, address, group: group.trim(), note });
   };
   return (
     <div>
       <Field label="Tên khách hàng *"><TextInput value={name} onChange={(e) => setName(e.target.value)} placeholder="VD: Anh Minh - Decal ABC" /></Field>
-      <Field label="Số điện thoại"><TextInput value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="09xx xxx xxx" /></Field>
+      <Field label="Số điện thoại *"><TextInput type="tel" value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="09xx xxx xxx" /></Field>
+      {error && <div className="text-xs font-semibold mb-3 -mt-2" style={{ color: C.red }}>{error}</div>}
       <Field label="Email"><TextInput value={email} onChange={(e) => setEmail(e.target.value)} placeholder="email@vidu.com" /></Field>
       <Field label="Địa chỉ"><TextInput value={address} onChange={(e) => setAddress(e.target.value)} placeholder="Địa chỉ" /></Field>
       <Field label="Nhóm khách hàng">
@@ -1250,7 +1242,12 @@ function CustomerDetailScreen({ customer, quotesList, revenue, quoteTotal, onEdi
           </div>
         </div>
         <div className="flex flex-col gap-2 text-sm">
-          {customer.phone && <div className="flex items-center gap-2" style={{ color: C.text }}><Phone size={14} color={C.sub} />{customer.phone}</div>}
+          {customer.phone && (
+            <a href={`tel:${customer.phone}`} className="flex items-center justify-between rounded-xl px-3 py-2" style={{ backgroundColor: C.greenBg }}>
+              <span className="flex items-center gap-2" style={{ color: C.text }}><Phone size={14} color={C.green} />{customer.phone}</span>
+              <span className="text-xs font-bold" style={{ color: C.green }}>Gọi ngay</span>
+            </a>
+          )}
           {customer.email && <div className="flex items-center gap-2" style={{ color: C.text }}><Mail size={14} color={C.sub} />{customer.email}</div>}
           {customer.address && <div className="flex items-center gap-2" style={{ color: C.text }}><MapPin size={14} color={C.sub} />{customer.address}</div>}
         </div>
@@ -1520,7 +1517,18 @@ function QuoteDetailScreen({ quote, customer, quoteTotal, quoteCost, quoteProfit
           <Pill label={st.label} color={st.color} bg={st.bg} />
         </div>
       </div>
-      <div className="text-xs mb-4" style={{ color: C.sub }}>{customer?.name || "Khách lẻ"} · {new Date(quote.createdAt).toLocaleDateString("vi-VN")}</div>
+      <div className="flex items-center justify-between mb-4">
+        <span className="text-xs" style={{ color: C.sub }}>{customer?.name || "Khách lẻ"} · {new Date(quote.createdAt).toLocaleDateString("vi-VN")}</span>
+        {customer?.phone && (
+          <a
+            href={`tel:${customer.phone}`}
+            className="flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold"
+            style={{ color: C.green, backgroundColor: C.greenBg }}
+          >
+            <Phone size={12} /> Gọi
+          </a>
+        )}
+      </div>
 
       {/* Bộ nút hành động - tự động đổi theo trạng thái, trạng thái không còn bấm tự do */}
       {quote.status === "draft" && (
@@ -1697,9 +1705,12 @@ function QuoteFormScreen({ existing, presetCustomer, revising, customers, produc
   const updateItem = (i, patch) => setItems((prev) => prev.map((it, idx) => (idx === i ? { ...it, ...patch } : it)));
   const removeItem = (i) => setItems((prev) => prev.filter((_, idx) => idx !== i));
 
+  const [quickCustError, setQuickCustError] = useState("");
   const saveNewCustomer = () => {
-    if (!newCustName.trim()) return;
-    const c = { id: uid(), name: newCustName.trim(), phone: newCustPhone, email: "", address: "", note: "" };
+    if (!newCustName.trim()) { setQuickCustError("Vui lòng nhập tên khách hàng"); return; }
+    if (!newCustPhone.trim()) { setQuickCustError("Vui lòng nhập số điện thoại"); return; }
+    setQuickCustError("");
+    const c = { id: uid(), name: newCustName.trim(), phone: newCustPhone.trim(), email: "", address: "", note: "" };
     onSaveCustomer(c);
     setCustomerId(c.id);
     setQuickCust(false);
@@ -1760,8 +1771,9 @@ function QuoteFormScreen({ existing, presetCustomer, revising, customers, produc
           </div>
         ) : (
           <div className="rounded-xl p-3" style={{ backgroundColor: C.inputBg, border: `1px solid ${C.border}` }}>
-            <TextInput placeholder="Tên khách hàng" value={newCustName} onChange={(e) => setNewCustName(e.target.value)} style={{ marginBottom: 8 }} />
-            <TextInput placeholder="Số điện thoại" value={newCustPhone} onChange={(e) => setNewCustPhone(e.target.value)} style={{ marginBottom: 8 }} />
+            <TextInput placeholder="Tên khách hàng *" value={newCustName} onChange={(e) => setNewCustName(e.target.value)} style={{ marginBottom: 8 }} />
+            <TextInput type="tel" placeholder="Số điện thoại *" value={newCustPhone} onChange={(e) => setNewCustPhone(e.target.value)} style={{ marginBottom: 8 }} />
+            {quickCustError && <div className="text-xs font-semibold mb-2" style={{ color: C.red }}>{quickCustError}</div>}
             <div className="flex gap-2">
               <button onClick={saveNewCustomer} className="flex-1 py-2 rounded-lg text-xs font-bold text-white" style={{ backgroundColor: C.navy }}>Lưu</button>
               <button onClick={() => setQuickCust(false)} className="flex-1 py-2 rounded-lg text-xs font-bold" style={{ backgroundColor: C.neutralBg, color: C.sub }}>Huỷ</button>
@@ -2025,7 +2037,7 @@ function TaskForm({ existing, presetDate, onSave, onCancel, onDelete }) {
 
   return (
     <div>
-      <Field label="Tên công việc *"><TextInput value={title} onChange={(e) => setTitle(e.target.value)} placeholder="VD: Gọi lại khách hàng ABC" /></Field>
+      <Field label="Tên công việc *"><TextInput value={title} onChange={(e) => setTitle(e.target.value)} placeholder="VD: Gọi lại khách hàng ABC" autoFocus /></Field>
 
       <Field label="Loại">
         <div className="flex gap-2">
