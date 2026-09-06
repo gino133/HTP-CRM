@@ -643,6 +643,7 @@ export default function PersonalCRM() {
 
   const custQuotes = (custId) => scopedQuotes.filter((q) => q.customerId === custId).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   const custRevenue = (custId) => countedQuotes.filter((q) => q.customerId === custId).reduce((s, q) => s + quoteTotal(q), 0);
+  const custTasks = (custId) => scopedTasks.filter((t) => t.customerId === custId).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
   const todayIso = isoDay(new Date());
   const todayTasks = useMemo(() => {
@@ -1016,6 +1017,7 @@ export default function PersonalCRM() {
             {tab === "tasks" && (
               <TasksTab
                 tasks={scopedTasks}
+                customers={scopedCustomers}
                 onAdd={(dateIso) => openScreen({ type: "taskForm", data: null, presetDate: dateIso })}
                 onEdit={(t) => openScreen({ type: "taskForm", data: t })}
                 onToggle={toggleTaskDone}
@@ -1119,12 +1121,15 @@ export default function PersonalCRM() {
                 <CustomerDetailScreen
                   customer={customers.find((c) => c.id === screen.id)}
                   quotesList={custQuotes(screen.id)}
+                  tasksList={custTasks(screen.id)}
                   revenue={custRevenue(screen.id)}
                   quoteTotal={quoteTotal}
                   onEdit={(c) => openSheet({ type: "customerForm", data: c })}
                   onDelete={(id) => { deleteCustomer(id); closeScreen(); showToast("Đã xoá khách hàng"); }}
                   onOpenQuote={(id) => openScreen({ type: "quoteDetail", id })}
                   onNewQuote={(custId) => openScreen({ type: "quoteForm", quote: null, presetCustomer: custId })}
+                  onOpenTask={(id) => openScreen({ type: "taskForm", data: scopedTasks.find((t) => t.id === id) })}
+                  onNewTask={(custId) => openScreen({ type: "taskForm", data: null, presetCustomerId: custId })}
                 />
               )}
             </Screen>
@@ -1187,6 +1192,8 @@ export default function PersonalCRM() {
                     key={screen.data?.id || "new"}
                     existing={screen.data}
                     presetDate={screen.presetDate}
+                    presetCustomerId={screen.presetCustomerId}
+                    customers={scopedCustomers}
                     onCancel={() => closeScreen()}
                     onDelete={screen.data ? (id) => { deleteTask(id); closeScreen(); showToast("Đã xoá công việc"); } : null}
                     onSave={(t) => { saveTaskWithNotification(t); closeScreen(); showToast("Đã lưu công việc"); }}
@@ -1493,7 +1500,7 @@ function CustomerForm({ existing, existingGroups, onSave, onCancel }) {
   );
 }
 
-function CustomerDetailScreen({ customer, quotesList, revenue, quoteTotal, onEdit, onDelete, onOpenQuote, onNewQuote }) {
+function CustomerDetailScreen({ customer, quotesList, tasksList, revenue, quoteTotal, onEdit, onDelete, onOpenQuote, onNewQuote, onOpenTask, onNewTask }) {
   if (!customer) return null;
   return (
     <div className="px-5 py-5">
@@ -1551,6 +1558,26 @@ function CustomerDetailScreen({ customer, quotesList, revenue, quoteTotal, onEdi
               </div>
             );
           })}
+        </div>
+      )}
+
+      <div className="flex items-center justify-between mb-2.5 mt-5">
+        <div className="text-sm font-bold" style={{ color: C.text }}>Công việc liên quan ({tasksList.length})</div>
+        <button onClick={() => onNewTask(customer.id)} className="text-xs font-bold" style={{ color: C.navy }}>+ Thêm việc</button>
+      </div>
+      {tasksList.length === 0 ? (
+        <div className="text-sm text-center py-8" style={{ color: C.sub }}>Chưa có công việc nào</div>
+      ) : (
+        <div className="flex flex-col gap-2.5">
+          {tasksList.map((t) => (
+            <div key={t.id} onClick={() => onOpenTask(t.id)} className="rounded-2xl p-3.5 flex items-center justify-between" style={{ backgroundColor: C.card, border: `1px solid ${C.border}` }}>
+              <div className="flex items-center gap-2.5 min-w-0">
+                {t.done ? <CheckCircle2 size={16} color={C.green} /> : <Circle size={16} color={C.sub} />}
+                <span className="text-sm font-semibold truncate" style={{ color: t.done ? C.sub : C.text, textDecoration: t.done ? "line-through" : "none" }}>{t.title}</span>
+              </div>
+              {t.type === "daily" && <Repeat size={12} color={C.blue} />}
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -2206,7 +2233,7 @@ function QuoteFormScreen({ existing, presetCustomer, revising, customers, produc
 }
 
 /* ---------------------------------- TASKS TAB (Công việc hằng ngày) ---------------------------------- */
-function TasksTab({ tasks, onAdd, onEdit, onToggle }) {
+function TasksTab({ tasks, customers, onAdd, onEdit, onToggle }) {
   const [anchor, setAnchor] = useState(startOfWeek(new Date()));
   const [selected, setSelected] = useState(new Date());
   const selIso = isoDay(selected);
@@ -2329,6 +2356,11 @@ function TasksTab({ tasks, onAdd, onEdit, onToggle }) {
                   {t.time && (
                     <span className="text-[10px] font-semibold flex items-center gap-1" style={{ color: C.sub }}><Clock size={10} /> {t.time}</span>
                   )}
+                  {t.customerId && (
+                    <span className="text-[10px] font-semibold flex items-center gap-1 px-1.5 py-0.5 rounded-full" style={{ color: C.navy, backgroundColor: C.navyBg }}>
+                      <Users size={9} /> {customers?.find((c) => c.id === t.customerId)?.name || "Khách hàng"}
+                    </span>
+                  )}
                   {t._overdue && <span className="text-[10px] font-bold" style={{ color: C.red }}>Quá hạn</span>}
                   {t._overdue && t.overdueNotifDate && <span className="text-[10px] font-bold flex items-center gap-0.5" style={{ color: C.amber }}><Bell size={9} /> Đang nhắc mỗi 30'</span>}
                 </div>
@@ -2342,12 +2374,13 @@ function TasksTab({ tasks, onAdd, onEdit, onToggle }) {
   );
 }
 
-function TaskForm({ existing, presetDate, onSave, onCancel, onDelete }) {
+function TaskForm({ existing, presetDate, presetCustomerId, customers, onSave, onCancel, onDelete }) {
   const [title, setTitle] = useState(existing?.title || "");
   const [type, setType] = useState(existing?.type || "once");
   const [date, setDate] = useState(existing?.date || presetDate || isoDay(new Date()));
   const [time, setTime] = useState(existing?.time || "");
   const [note, setNote] = useState(existing?.note || "");
+  const [customerId, setCustomerId] = useState(existing?.customerId || presetCustomerId || "");
 
   const submit = () => {
     if (!title.trim()) return;
@@ -2358,6 +2391,7 @@ function TaskForm({ existing, presetDate, onSave, onCancel, onDelete }) {
       date: type === "once" ? date : null,
       time: time || null,
       note,
+      customerId: customerId || null,
       done: existing?.done || false,
       completedDates: existing?.completedDates || [],
       createdAt: existing?.createdAt || todayISO(),
@@ -2367,6 +2401,13 @@ function TaskForm({ existing, presetDate, onSave, onCancel, onDelete }) {
   return (
     <div className="px-5 py-5 relative h-full">
       <Field label="Tên công việc *"><TextInput value={title} onChange={(e) => setTitle(e.target.value)} placeholder="VD: Gọi lại khách hàng ABC" /></Field>
+
+      <Field label="Khách hàng liên quan (không bắt buộc)">
+        <select value={customerId} onChange={(e) => setCustomerId(e.target.value)} style={getInputStyle()}>
+          <option value="">-- Không gắn khách hàng --</option>
+          {(customers || []).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
+      </Field>
 
       <Field label="Loại">
         <div className="flex gap-2">
