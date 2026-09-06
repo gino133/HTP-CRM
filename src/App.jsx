@@ -141,6 +141,107 @@ async function scheduleTaskNotification(task) {
   }
 }
 
+// Nhắc "quá hạn": tạo 1 loạt thông báo cách nhau 30 phút, từ 8h sáng đến 21h TRONG NGÀY HÔM NAY,
+// dành cho việc "một lần" đã quá ngày hẹn mà chưa đánh dấu xong. Gọi lại mỗi ngày (xem reconcileOverdueReminders)
+// để tự tạo loạt mới cho ngày kế tiếp, tạo cảm giác "nhắc liên tục đến khi hoàn thành".
+async function scheduleOverdueBatch(task) {
+  const LN = getLocalNotif();
+  if (!LN) return { ids: [], date: null };
+  try {
+    if (task.overdueNotifIds?.length) {
+      await LN.cancel({ notifications: task.overdueNotifIds.map((id) => ({ id })) }).catch(() => {});
+    }
+    const now = new Date();
+    const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 8, 0, 0, 0);
+    const dayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 21, 0, 0, 0);
+    let cursor = now > dayStart ? new Date(now) : dayStart;
+    if (cursor > dayStart) {
+      const mins = cursor.getMinutes();
+      const add = mins % 30 === 0 ? 0 : 30 - (mins % 30);
+      cursor = new Date(cursor.getTime() + add * 60000);
+      cursor.setSeconds(0, 0);
+    }
+    const notifications = [];
+    const ids = [];
+    while (cursor <= dayEnd && notifications.length < 20) {
+      const id = Math.floor(Math.random() * 2000000000);
+      ids.push(id);
+      notifications.push({
+        id,
+        title: "🔴 Việc quá hạn chưa hoàn thành",
+        body: task.title,
+        schedule: { at: new Date(cursor), allowWhileIdle: true },
+      });
+      cursor = new Date(cursor.getTime() + 30 * 60000);
+    }
+    if (notifications.length) await LN.schedule({ notifications });
+    return { ids, date: isoDay(now) };
+  } catch (e) {
+    return { ids: task.overdueNotifIds || [], date: task.overdueNotifDate || null };
+  }
+}
+
+async function cancelOverdueBatch(task) {
+  try {
+    const LN = getLocalNotif();
+    if (!LN || !task?.overdueNotifIds?.length) return;
+    await LN.cancel({ notifications: task.overdueNotifIds.map((id) => ({ id })) });
+  } catch (e) {}
+}
+
+/* ---------------------------------- NHẮC CÔNG NỢ ---------------------------------- */
+// Nhắc trước hạn 1 tuần (chỉ đặt 1 lần cho mỗi báo giá công nợ có hạn thanh toán)
+async function scheduleDebtWeekBefore(quote, custName) {
+  const LN = getLocalNotif();
+  if (!LN || !quote.dueDate) return null;
+  try {
+    const due = new Date(quote.dueDate + "T09:00:00");
+    const remindAt = new Date(due);
+    remindAt.setDate(remindAt.getDate() - 7);
+    if (remindAt.getTime() <= Date.now()) return null; // đã qua mốc nhắc trước hạn 1 tuần
+    const id = Math.floor(Math.random() * 2000000000);
+    await LN.schedule({
+      notifications: [{
+        id,
+        title: "💰 Sắp đến hạn thu công nợ",
+        body: `${custName} - hạn ${due.toLocaleDateString("vi-VN")}`,
+        schedule: { at: remindAt, allowWhileIdle: true },
+      }],
+    });
+    return id;
+  } catch (e) { return null; }
+}
+
+// Nhắc quá hạn công nợ, mỗi ngày 1 lần cho đến khi đánh dấu đã thu
+async function scheduleDebtOverdueDaily(quote, custName) {
+  const LN = getLocalNotif();
+  if (!LN) return null;
+  try {
+    const id = Math.floor(Math.random() * 2000000000);
+    const now = new Date();
+    let at = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 9, 0, 0, 0);
+    if (at.getTime() <= now.getTime()) at = new Date(now.getTime() + 15000); // đã qua 9h -> báo gần như ngay
+    await LN.schedule({
+      notifications: [{
+        id,
+        title: "🔴 Công nợ quá hạn thanh toán",
+        body: `${custName} - đã quá hạn, cần thu hồi`,
+        schedule: { at, allowWhileIdle: true },
+      }],
+    });
+    return id;
+  } catch (e) { return null; }
+}
+
+async function cancelDebtNotifs(quote) {
+  try {
+    const LN = getLocalNotif();
+    const ids = [quote?.debtWeekBeforeNotifId, quote?.debtOverdueNotifId].filter(Boolean);
+    if (!LN || !ids.length) return;
+    await LN.cancel({ notifications: ids.map((id) => ({ id })) });
+  } catch (e) {}
+}
+
 const money = (n) => (Math.round(n || 0)).toLocaleString("vi-VN") + "đ";
 const todayISO = () => new Date().toISOString();
 const monthLabel = (d) => {
@@ -189,10 +290,12 @@ async function loadAll() {
         tasks: parsed.tasks || [],
         themeMode: parsed.themeMode || "system",
         accentTone: parsed.accentTone || "navy",
+        businesses: parsed.businesses || [],
+        currentBusinessId: parsed.currentBusinessId || null,
       };
     }
   } catch (e) {}
-  return { customers: [], products: [], quotes: [], tasks: [], themeMode: "system", accentTone: "navy" };
+  return { customers: [], products: [], quotes: [], tasks: [], themeMode: "system", accentTone: "navy", businesses: [], currentBusinessId: null };
 }
 async function saveAll(data) {
   try {
@@ -376,6 +479,39 @@ export default function PersonalCRM() {
   const [themeMode, setThemeMode] = useState("system"); // 'light' | 'dark' | 'system'
   const [accentTone, setAccentTone] = useState("navy");
   const [systemPrefersDark, setSystemPrefersDark] = useState(false);
+  const [businesses, setBusinesses] = useState([]); // [{id, name}] - các doanh nghiệp/công việc tách biệt
+  const [currentBusinessId, setCurrentBusinessId] = useState(null);
+
+  // Chặn zoom/pinch của trình duyệt - phòng khi trang bao ngoài (Claude/webview) cho phép zoom,
+  // gây hiện tượng lệch/cắt hình khi người dùng lỡ chạm 2 ngón tay. Tự ghi đè thẻ viewport ngay khi mở app.
+  useEffect(() => {
+    try {
+      let meta = document.querySelector('meta[name="viewport"]');
+      if (!meta) {
+        meta = document.createElement("meta");
+        meta.name = "viewport";
+        document.head.appendChild(meta);
+      }
+      meta.setAttribute("content", "width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover");
+      document.documentElement.style.overflowX = "hidden";
+      document.body.style.overflowX = "hidden";
+      document.body.style.touchAction = "pan-y";
+      // Chặn thêm cử chỉ zoom 2 ngón tay ở tầng sự kiện, phòng khi trang bao ngoài không tôn trọng thẻ meta trên
+      const blockGesture = (e) => e.preventDefault();
+      let lastTouchEnd = 0;
+      const blockDoubleTap = (e) => {
+        const now = Date.now();
+        if (now - lastTouchEnd <= 300) e.preventDefault();
+        lastTouchEnd = now;
+      };
+      document.addEventListener("gesturestart", blockGesture, { passive: false });
+      document.addEventListener("touchend", blockDoubleTap, { passive: false });
+      return () => {
+        document.removeEventListener("gesturestart", blockGesture);
+        document.removeEventListener("touchend", blockDoubleTap);
+      };
+    } catch (e) {}
+  }, []);
 
   useEffect(() => {
     try {
@@ -428,16 +564,34 @@ export default function PersonalCRM() {
 
   useEffect(() => {
     loadAll().then((d) => {
-      setCustomers(d.customers);
-      setProducts(d.products);
-      setQuotes(d.quotes);
-      setTasks(d.tasks);
+      // Doanh nghiệp: nếu chưa từng có, tự tạo 1 doanh nghiệp mặc định và gán toàn bộ dữ liệu cũ vào đó
+      // (di trú dữ liệu - không làm mất dữ liệu đã có trước khi có tính năng này)
+      let businessList = d.businesses;
+      let curBizId = d.currentBusinessId;
+      let migCustomers = d.customers, migProducts = d.products, migQuotes = d.quotes, migTasks = d.tasks;
+      if (!businessList || businessList.length === 0) {
+        const defaultId = uid();
+        businessList = [{ id: defaultId, name: "Công việc chung" }];
+        curBizId = defaultId;
+        migCustomers = migCustomers.map((x) => ({ ...x, businessId: x.businessId || defaultId }));
+        migProducts = migProducts.map((x) => ({ ...x, businessId: x.businessId || defaultId }));
+        migQuotes = migQuotes.map((x) => ({ ...x, businessId: x.businessId || defaultId }));
+        migTasks = migTasks.map((x) => ({ ...x, businessId: x.businessId || defaultId }));
+      } else if (!curBizId || !businessList.some((b) => b.id === curBizId)) {
+        curBizId = businessList[0].id;
+      }
+      setCustomers(migCustomers);
+      setProducts(migProducts);
+      setQuotes(migQuotes);
+      setTasks(migTasks);
+      setBusinesses(businessList);
+      setCurrentBusinessId(curBizId);
       setThemeMode(d.themeMode);
       setAccentTone(d.accentTone);
       setLoaded(true);
       requestNotifPermission(); // Xin quyền gửi thông báo (chỉ có tác dụng khi chạy app thật)
       // Tự đặt lịch cho các công việc đã có giờ nhắc nhưng chưa từng được đặt lịch (vd: tạo trước khi có tính năng này)
-      (d.tasks || []).forEach((t) => {
+      migTasks.forEach((t) => {
         if (t.time && !t.notifId && !t.done) {
           scheduleTaskNotification(t).then((notifId) => {
             if (notifId) setTasks((prev) => prev.map((x) => (x.id === t.id ? { ...x, notifId } : x)));
@@ -449,9 +603,9 @@ export default function PersonalCRM() {
 
   useEffect(() => {
     if (!loaded) return;
-    const t = setTimeout(() => saveAll({ customers, products, quotes, tasks, themeMode, accentTone }), 350);
+    const t = setTimeout(() => saveAll({ customers, products, quotes, tasks, themeMode, accentTone, businesses, currentBusinessId }), 350);
     return () => clearTimeout(t);
-  }, [customers, products, quotes, tasks, themeMode, accentTone, loaded]);
+  }, [customers, products, quotes, tasks, themeMode, accentTone, businesses, currentBusinessId, loaded]);
 
   useEffect(() => {
     if (!toast) return;
@@ -461,12 +615,18 @@ export default function PersonalCRM() {
 
   const showToast = (m) => setToast(m);
 
-  /* ---------- derived data ---------- */
+  /* ---------- dữ liệu đã lọc theo doanh nghiệp đang chọn ---------- */
+  const scopedCustomers = useMemo(() => customers.filter((c) => c.businessId === currentBusinessId), [customers, currentBusinessId]);
+  const scopedProducts = useMemo(() => products.filter((p) => p.businessId === currentBusinessId), [products, currentBusinessId]);
+  const scopedQuotes = useMemo(() => quotes.filter((q) => q.businessId === currentBusinessId), [quotes, currentBusinessId]);
+  const scopedTasks = useMemo(() => tasks.filter((t) => t.businessId === currentBusinessId), [tasks, currentBusinessId]);
+
+  /* ---------- derived data (tính trên dữ liệu đã lọc theo doanh nghiệp) ---------- */
   const quoteTotal = (q) => q.items.reduce((s, it) => s + it.qty * it.unitPrice, 0);
   const quoteCost = (q) => q.items.reduce((s, it) => s + it.qty * it.unitCost, 0);
   const quoteProfit = (q) => quoteTotal(q) - quoteCost(q);
 
-  const countedQuotes = useMemo(() => quotes.filter((q) => q.status === "won" || q.status === "done"), [quotes]);
+  const countedQuotes = useMemo(() => scopedQuotes.filter((q) => q.status === "won" || q.status === "done"), [scopedQuotes]);
 
   const thisMonthKey = monthKey(new Date());
   const monthRevenue = useMemo(
@@ -477,31 +637,32 @@ export default function PersonalCRM() {
     () => countedQuotes.filter((q) => monthKey(revenueDate(q)) === thisMonthKey).reduce((s, q) => s + quoteProfit(q), 0),
     [countedQuotes]
   );
-  const pendingQuotes = quotes.filter((q) => q.status === "sent" || q.status === "draft");
-  const inProgress = quotes.filter((q) => q.status === "won" && (q.progress || 0) < 100);
+  const pendingQuotes = scopedQuotes.filter((q) => q.status === "sent" || q.status === "draft");
+  const inProgress = scopedQuotes.filter((q) => q.status === "won" && (q.progress || 0) < 100);
 
 
-  const custQuotes = (custId) => quotes.filter((q) => q.customerId === custId).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  const custQuotes = (custId) => scopedQuotes.filter((q) => q.customerId === custId).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   const custRevenue = (custId) => countedQuotes.filter((q) => q.customerId === custId).reduce((s, q) => s + quoteTotal(q), 0);
 
   const todayIso = isoDay(new Date());
   const todayTasks = useMemo(() => {
-    const once = tasks.filter((t) => t.type === "once" && t.date === todayIso);
-    const daily = tasks.filter((t) => t.type === "daily");
+    const once = scopedTasks.filter((t) => t.type === "once" && t.date === todayIso);
+    const daily = scopedTasks.filter((t) => t.type === "daily");
     const merged = [...once, ...daily].map((t) => ({
       ...t,
       _done: t.type === "daily" ? (t.completedDates || []).includes(todayIso) : !!t.done,
     }));
     merged.sort((a, b) => (a.time || "99:99").localeCompare(b.time || "99:99"));
     return merged;
-  }, [tasks, todayIso]);
+  }, [scopedTasks, todayIso]);
   const pendingTodayCount = todayTasks.filter((t) => !t._done).length;
 
   /* ---------- CRUD ---------- */
   const upsertCustomer = (c) => {
+    const withBiz = { ...c, businessId: c.businessId || currentBusinessId };
     setCustomers((prev) => {
-      const exists = prev.some((x) => x.id === c.id);
-      return exists ? prev.map((x) => (x.id === c.id ? c : x)) : [...prev, c];
+      const exists = prev.some((x) => x.id === withBiz.id);
+      return exists ? prev.map((x) => (x.id === withBiz.id ? withBiz : x)) : [...prev, withBiz];
     });
   };
   const deleteCustomer = (id) => {
@@ -509,20 +670,51 @@ export default function PersonalCRM() {
     setQuotes((prev) => prev.filter((q) => q.customerId !== id));
   };
   const upsertProduct = (p) => {
+    const withBiz = { ...p, businessId: p.businessId || currentBusinessId };
     setProducts((prev) => {
-      const exists = prev.some((x) => x.id === p.id);
-      return exists ? prev.map((x) => (x.id === p.id ? p : x)) : [...prev, p];
+      const exists = prev.some((x) => x.id === withBiz.id);
+      return exists ? prev.map((x) => (x.id === withBiz.id ? withBiz : x)) : [...prev, withBiz];
     });
   };
   const deleteProduct = (id) => setProducts((prev) => prev.filter((x) => x.id !== id));
 
   const upsertQuote = (q) => {
+    const withBiz = { ...q, businessId: q.businessId || currentBusinessId };
     setQuotes((prev) => {
-      const exists = prev.some((x) => x.id === q.id);
-      return exists ? prev.map((x) => (x.id === q.id ? q : x)) : [...prev, q];
+      const exists = prev.some((x) => x.id === withBiz.id);
+      return exists ? prev.map((x) => (x.id === withBiz.id ? withBiz : x)) : [...prev, withBiz];
     });
   };
-  const deleteQuote = (id) => setQuotes((prev) => prev.filter((x) => x.id !== id));
+  const deleteQuote = (id) => {
+    const q = quotes.find((x) => x.id === id);
+    if (q) cancelDebtNotifs(q);
+    setQuotes((prev) => prev.filter((x) => x.id !== id));
+  };
+  const markDebtPaid = (q) => {
+    cancelDebtNotifs(q);
+    upsertQuote({ ...q, debtPaid: true, debtWeekBeforeNotifId: null, debtOverdueNotifId: null });
+  };
+  // Rà soát công nợ mỗi ngày: nhắc trước hạn 1 tuần (1 lần), và nhắc quá hạn mỗi ngày cho đến khi đã thu
+  useEffect(() => {
+    if (!loaded) return;
+    const today = isoDay(new Date());
+    quotes.forEach((q) => {
+      if (q.paymentType === "credit" && q.dueDate && !q.debtPaid) {
+        const cust = customers.find((c) => c.id === q.customerId);
+        const custName = cust?.name || "Khách lẻ";
+        if (!q.debtWeekBeforeNotifId && !q.debtWeekBeforeTried) {
+          scheduleDebtWeekBefore(q, custName).then((id) => {
+            setQuotes((prev) => prev.map((x) => (x.id === q.id ? { ...x, debtWeekBeforeNotifId: id, debtWeekBeforeTried: true } : x)));
+          });
+        }
+        if (q.dueDate < today && q.debtLastNotifDate !== today) {
+          scheduleDebtOverdueDaily(q, custName).then((id) => {
+            setQuotes((prev) => prev.map((x) => (x.id === q.id ? { ...x, debtOverdueNotifId: id, debtLastNotifDate: today } : x)));
+          });
+        }
+      }
+    });
+  }, [quotes, customers, loaded]);
   // Sao chép thành báo giá mới (khách hỏi lại giá / đặt lại đơn) - giữ khách hàng + sản phẩm, số mới, trạng thái về Nháp
   const copyQuote = (q) => {
     const newQ = {
@@ -535,6 +727,9 @@ export default function PersonalCRM() {
       progress: 0,
       items: q.items.map((it) => ({ ...it })),
       note: q.note || "",
+      paymentType: q.paymentType || "cash",
+      dueDate: null,
+      debtPaid: false,
     };
     upsertQuote(newQ);
     openScreen({ type: "quoteDetail", id: newQ.id });
@@ -542,19 +737,21 @@ export default function PersonalCRM() {
   };
 
   const upsertTask = (t) => {
+    const withBiz = { ...t, businessId: t.businessId || currentBusinessId };
     setTasks((prev) => {
-      const exists = prev.some((x) => x.id === t.id);
-      return exists ? prev.map((x) => (x.id === t.id ? t : x)) : [...prev, t];
+      const exists = prev.some((x) => x.id === withBiz.id);
+      return exists ? prev.map((x) => (x.id === withBiz.id ? withBiz : x)) : [...prev, withBiz];
     });
   };
   // Dùng khi lưu từ màn hình Thêm/Sửa công việc - có đặt/đặt lại lịch thông báo thật
   const saveTaskWithNotification = async (t) => {
     const notifId = await scheduleTaskNotification(t);
-    upsertTask({ ...t, notifId });
+    await cancelOverdueBatch(t); // huỷ loạt nhắc quá hạn cũ; cơ chế rà soát tự đặt lại nếu vẫn còn quá hạn
+    upsertTask({ ...t, notifId, overdueNotifIds: [], overdueNotifDate: null });
   };
   const deleteTask = (id) => {
     const task = tasks.find((x) => x.id === id);
-    if (task) cancelTaskNotification(task);
+    if (task) { cancelTaskNotification(task); cancelOverdueBatch(task); }
     setTasks((prev) => prev.filter((x) => x.id !== id));
   };
   const toggleTaskDone = (task, dayIso) => {
@@ -565,17 +762,33 @@ export default function PersonalCRM() {
     } else {
       const nowDone = !task.done;
       if (nowDone) {
-        // Đã xong -> huỷ nhắc, không cần nhắc việc đã hoàn thành nữa
+        // Đã xong -> huỷ toàn bộ nhắc (kể cả loạt nhắc quá hạn), không cần nhắc việc đã hoàn thành nữa
         cancelTaskNotification(task);
-        upsertTask({ ...task, done: true, notifId: null });
+        cancelOverdueBatch(task);
+        upsertTask({ ...task, done: true, notifId: null, overdueNotifIds: [], overdueNotifDate: null });
       } else {
-        // Bỏ đánh dấu xong -> đặt lại nhắc nếu còn hợp lệ
+        // Bỏ đánh dấu xong -> đặt lại nhắc nếu còn hợp lệ; cơ chế rà soát sẽ tự thêm loạt nhắc quá hạn nếu cần
         scheduleTaskNotification(task).then((notifId) => {
-          upsertTask({ ...task, done: false, notifId });
+          upsertTask({ ...task, done: false, notifId, overdueNotifIds: [], overdueNotifDate: null });
         });
       }
     }
   };
+
+  // Rà soát các việc "một lần" đã quá hạn (quá ngày hẹn) mà chưa hoàn thành: mỗi ngày (khi mở lại app)
+  // tự đặt 1 loạt nhắc cách nhau 30 phút từ 8h-21h cho NGÀY HÔM NAY, lặp lại cơ chế này mỗi ngày cho đến
+  // khi việc được đánh dấu hoàn thành.
+  useEffect(() => {
+    if (!loaded) return;
+    const today = isoDay(new Date());
+    tasks.forEach((t) => {
+      if (t.type === "once" && !t.done && t.date && t.date < today && t.overdueNotifDate !== today) {
+        scheduleOverdueBatch(t).then(({ ids, date }) => {
+          setTasks((prev) => prev.map((x) => (x.id === t.id ? { ...x, overdueNotifIds: ids, overdueNotifDate: date } : x)));
+        });
+      }
+    });
+  }, [tasks, loaded]);
 
   // Tạo bộ dữ liệu mẫu (khách hàng, sản phẩm, báo giá/đơn hàng trải vài tháng, công việc) để xem trực quan
   const seedDemoData = () => {
@@ -719,10 +932,10 @@ export default function PersonalCRM() {
       { id: uid(), title: "Liên hệ lại khách hàng chờ báo giá", type: "once", date: isoDay(addDays(now, 1)), time: "10:30", note: "", done: false, completedDates: [], createdAt: todayISO() },
     ];
 
-    setCustomers((prev) => [...prev, ...newCustomers]);
-    setProducts((prev) => [...prev, ...newProducts]);
-    setQuotes((prev) => [...prev, ...newQuotes]);
-    setTasks((prev) => [...prev, ...newTasks]);
+    setCustomers((prev) => [...prev, ...newCustomers.map((x) => ({ ...x, businessId: currentBusinessId }))]);
+    setProducts((prev) => [...prev, ...newProducts.map((x) => ({ ...x, businessId: currentBusinessId }))]);
+    setQuotes((prev) => [...prev, ...newQuotes.map((x) => ({ ...x, businessId: currentBusinessId }))]);
+    setTasks((prev) => [...prev, ...newTasks.map((x) => ({ ...x, businessId: currentBusinessId }))]);
     showToast(`Đã tạo ${newCustomers.length} khách hàng, ${newProducts.length} sản phẩm, ${newQuotes.length} báo giá`);
   };
 
@@ -755,8 +968,8 @@ export default function PersonalCRM() {
                 pendingCount={pendingQuotes.length}
                 inProgress={inProgress}
                 quoteTotal={quoteTotal}
-                customers={customers}
-                quotes={quotes}
+                customers={scopedCustomers}
+                quotes={scopedQuotes}
                 onOpenQuote={(id) => openScreen({ type: "quoteDetail", id })}
                 onNewQuote={() => openScreen({ type: "quoteForm", quote: null })}
                 onOpenReports={() => openScreen({ type: "reports" })}
@@ -767,11 +980,14 @@ export default function PersonalCRM() {
                 onGoQuotes={goToQuotes}
                 onSeedDemo={seedDemoData}
                 onOpenSettings={() => openScreen({ type: "settings" })}
+                businesses={businesses}
+                currentBusinessId={currentBusinessId}
+                onOpenBusinessSwitch={() => openScreen({ type: "businessSwitch" })}
               />
             )}
             {tab === "customers" && (
               <CustomersTab
-                customers={customers}
+                customers={scopedCustomers}
                 custRevenue={custRevenue}
                 custQuotes={custQuotes}
                 onAdd={() => openSheet({ type: "customerForm", data: null })}
@@ -780,16 +996,16 @@ export default function PersonalCRM() {
             )}
             {tab === "products" && (
               <ProductsTab
-                products={products}
+                products={scopedProducts}
                 onAdd={() => openScreen({ type: "productForm", data: null })}
                 onEdit={(p) => openScreen({ type: "productForm", data: p })}
               />
             )}
             {tab === "quotes" && (
               <QuotesTab
-                key={`${quotesEntry.mode}-${quotesEntry.filter}`}
-                quotes={quotes}
-                customers={customers}
+                key={`${quotesEntry.mode}-${quotesEntry.filter}-${currentBusinessId}`}
+                quotes={scopedQuotes}
+                customers={scopedCustomers}
                 quoteTotal={quoteTotal}
                 initialMode={quotesEntry.mode}
                 initialFilter={quotesEntry.filter}
@@ -799,7 +1015,7 @@ export default function PersonalCRM() {
             )}
             {tab === "tasks" && (
               <TasksTab
-                tasks={tasks}
+                tasks={scopedTasks}
                 onAdd={(dateIso) => openScreen({ type: "taskForm", data: null, presetDate: dateIso })}
                 onEdit={(t) => openScreen({ type: "taskForm", data: t })}
                 onToggle={toggleTaskDone}
@@ -814,11 +1030,42 @@ export default function PersonalCRM() {
             >
               {screen?.type === "reports" && (
                 <ReportsTab
-                  quotes={quotes}
-                  customers={customers}
+                  quotes={scopedQuotes}
+                  customers={scopedCustomers}
                   quoteTotal={quoteTotal}
                   quoteCost={quoteCost}
                   onOpenQuote={(id) => openScreen({ type: "quoteDetail", id })}
+                />
+              )}
+            </Screen>
+
+            <Screen
+              open={screenOpen && screen?.type === "businessSwitch"}
+              title="Doanh nghiệp / Công việc"
+              onBack={() => closeScreen()}
+            >
+              {screen?.type === "businessSwitch" && (
+                <BusinessSwitchScreen
+                  businesses={businesses}
+                  currentBusinessId={currentBusinessId}
+                  onSwitch={(id) => { setCurrentBusinessId(id); closeScreen(); }}
+                  onAdd={(name) => {
+                    const nb = { id: uid(), name };
+                    setBusinesses((prev) => [...prev, nb]);
+                    setCurrentBusinessId(nb.id);
+                  }}
+                  onRename={(id, name) => setBusinesses((prev) => prev.map((b) => (b.id === id ? { ...b, name } : b)))}
+                  onDelete={(id) => {
+                    setBusinesses((prev) => prev.filter((b) => b.id !== id));
+                    setCustomers((prev) => prev.filter((x) => x.businessId !== id));
+                    setProducts((prev) => prev.filter((x) => x.businessId !== id));
+                    setQuotes((prev) => prev.filter((x) => x.businessId !== id));
+                    setTasks((prev) => prev.filter((x) => x.businessId !== id));
+                    if (currentBusinessId === id) {
+                      const remain = businesses.filter((b) => b.id !== id);
+                      setCurrentBusinessId(remain[0]?.id || null);
+                    }
+                  }}
                 />
               )}
             </Screen>
@@ -835,6 +1082,9 @@ export default function PersonalCRM() {
                   onSetThemeMode={setThemeMode}
                   onSetAccentTone={setAccentTone}
                   systemPrefersDark={systemPrefersDark}
+                  businesses={businesses}
+                  currentBusinessId={currentBusinessId}
+                  onOpenBusinessSwitch={() => openScreen({ type: "businessSwitch" })}
                 />
               )}
             </Screen>
@@ -855,6 +1105,7 @@ export default function PersonalCRM() {
                   onDelete={(id) => { deleteQuote(id); closeScreen(); showToast("Đã xoá báo giá"); }}
                   onEdit={(q, revising) => openScreen({ type: "quoteForm", quote: q, revising })}
                   onCopy={copyQuote}
+                  onMarkDebtPaid={markDebtPaid}
                 />
               )}
             </Screen>
@@ -884,18 +1135,26 @@ export default function PersonalCRM() {
               onBack={() => closeScreen()}
             >
               {screen?.type === "quoteForm" && (
-                <QuoteFormScreen
-                  key={screen.quote?.id || "new"}
-                  existing={screen.quote}
-                  presetCustomer={screen.presetCustomer}
-                  revising={screen.revising}
-                  customers={customers}
-                  products={products}
-                  quotes={quotes}
-                  onSaveCustomer={upsertCustomer}
-                  onSave={(q) => { upsertQuote(q); closeScreen(); showToast("Đã lưu báo giá"); }}
-                  onCancel={() => closeScreen()}
-                />
+                <ErrorBoundary>
+                  <QuoteFormScreen
+                    key={screen.quote?.id || "new"}
+                    existing={screen.quote}
+                    presetCustomer={screen.presetCustomer}
+                    revising={screen.revising}
+                    customers={customers}
+                    products={products}
+                    quotes={quotes}
+                    onSaveCustomer={upsertCustomer}
+                    onSave={(q) => {
+                      // Nếu hạn thanh toán vừa đổi/xoá, huỷ lịch nhắc công nợ cũ trước (cơ chế rà soát sẽ tự đặt lại nếu cần)
+                      if (screen.quote && screen.quote.dueDate !== q.dueDate) cancelDebtNotifs(screen.quote);
+                      upsertQuote(q);
+                      closeScreen();
+                      showToast("Đã lưu báo giá");
+                    }}
+                    onCancel={() => closeScreen()}
+                  />
+                </ErrorBoundary>
               )}
             </Screen>
 
@@ -905,17 +1164,15 @@ export default function PersonalCRM() {
               onBack={() => closeScreen()}
             >
               {screen?.type === "productForm" && (
-                <div className="px-5 py-5">
-                  <ErrorBoundary>
-                    <ProductForm
-                      key={screen.data?.id || "new"}
-                      existing={screen.data}
-                      onCancel={() => closeScreen()}
-                      onDelete={screen.data ? (id) => { deleteProduct(id); closeScreen(); showToast("Đã xoá sản phẩm"); } : null}
-                      onSave={(p) => { upsertProduct(p); closeScreen(); showToast("Đã lưu sản phẩm"); }}
-                    />
-                  </ErrorBoundary>
-                </div>
+                <ErrorBoundary>
+                  <ProductForm
+                    key={screen.data?.id || "new"}
+                    existing={screen.data}
+                    onCancel={() => closeScreen()}
+                    onDelete={screen.data ? (id) => { deleteProduct(id); closeScreen(); showToast("Đã xoá sản phẩm"); } : null}
+                    onSave={(p) => { upsertProduct(p); closeScreen(); showToast("Đã lưu sản phẩm"); }}
+                  />
+                </ErrorBoundary>
               )}
             </Screen>
 
@@ -925,18 +1182,16 @@ export default function PersonalCRM() {
               onBack={() => closeScreen()}
             >
               {screen?.type === "taskForm" && (
-                <div className="px-5 py-5">
-                  <ErrorBoundary>
-                    <TaskForm
-                      key={screen.data?.id || "new"}
-                      existing={screen.data}
-                      presetDate={screen.presetDate}
-                      onCancel={() => closeScreen()}
-                      onDelete={screen.data ? (id) => { deleteTask(id); closeScreen(); showToast("Đã xoá công việc"); } : null}
-                      onSave={(t) => { saveTaskWithNotification(t); closeScreen(); showToast("Đã lưu công việc"); }}
-                    />
-                  </ErrorBoundary>
-                </div>
+                <ErrorBoundary>
+                  <TaskForm
+                    key={screen.data?.id || "new"}
+                    existing={screen.data}
+                    presetDate={screen.presetDate}
+                    onCancel={() => closeScreen()}
+                    onDelete={screen.data ? (id) => { deleteTask(id); closeScreen(); showToast("Đã xoá công việc"); } : null}
+                    onSave={(t) => { saveTaskWithNotification(t); closeScreen(); showToast("Đã lưu công việc"); }}
+                  />
+                </ErrorBoundary>
               )}
             </Screen>
           </ErrorBoundary>
@@ -994,12 +1249,13 @@ function TabBtn({ icon: Icon, label, active, onClick }) {
 }
 
 /* ---------------------------------- HOME TAB ---------------------------------- */
-function HomeTab({ monthRevenue, monthProfit, pendingCount, inProgress, quoteTotal, customers, quotes, onOpenQuote, onNewQuote, onOpenReports, todayTasks, pendingTodayCount, onToggleTask, onGoTasks, onGoQuotes, onSeedDemo, onOpenSettings }) {
+function HomeTab({ monthRevenue, monthProfit, pendingCount, inProgress, quoteTotal, customers, quotes, onOpenQuote, onNewQuote, onOpenReports, todayTasks, pendingTodayCount, onToggleTask, onGoTasks, onGoQuotes, onSeedDemo, onOpenSettings, businesses, currentBusinessId, onOpenBusinessSwitch }) {
   const recent = [...quotes].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 5);
   const isEmpty = customers.length === 0 && quotes.length === 0;
+  const currentBiz = businesses?.find((b) => b.id === currentBusinessId);
   return (
     <div className="h-full overflow-y-auto px-5 pb-6">
-      <div className="flex items-center justify-between pt-3 pb-4">
+      <div className="flex items-center justify-between pt-3 pb-2.5">
         <div>
           <div className="text-xs" style={{ color: C.sub }}>Xin chào 👋</div>
           <div className="text-xl font-bold" style={{ color: C.text }}>Tổng quan công việc</div>
@@ -1016,6 +1272,19 @@ function HomeTab({ monthRevenue, monthProfit, pendingCount, inProgress, quoteTot
           </button>
         </div>
       </div>
+
+      {businesses && businesses.length > 0 && (
+        <button
+          onClick={onOpenBusinessSwitch}
+          className="flex items-center gap-2 px-3 py-2 rounded-xl mb-4 w-full"
+          style={{ backgroundColor: C.navyBg, border: `1px solid ${C.navy}` }}
+        >
+          <Building2 size={14} color={C.navy} />
+          <span className="text-xs font-bold flex-1 text-left truncate" style={{ color: C.navy }}>{currentBiz?.name || "Chọn doanh nghiệp"}</span>
+          {businesses.length > 1 && <span className="text-[10px] font-semibold" style={{ color: C.navy }}>Đổi ›</span>}
+        </button>
+      )}
+
 
       {isEmpty && (
         <button
@@ -1357,7 +1626,7 @@ function ProductForm({ existing, onSave, onCancel, onDelete }) {
     });
   };
   return (
-    <div>
+    <div className="px-5 py-5 relative h-full">
       <Field label="Tên sản phẩm *"><TextInput value={name} onChange={(e) => setName(e.target.value)} placeholder="VD: Decal PPF bóng - khổ 1.5m" /></Field>
       <Field label="Đơn vị tính"><TextInput value={unit} onChange={(e) => setUnit(e.target.value)} placeholder="cái, m2, cuộn..." /></Field>
       <div className="flex gap-3">
@@ -1464,11 +1733,16 @@ function QuotesTab({ quotes, customers, quoteTotal, onAdd, onOpen, initialMode, 
           {list.map((q) => {
             const cust = customers.find((c) => c.id === q.customerId);
             const st = getStatusMeta(q.status);
+            const todayIsoV = isoDay(new Date());
+            const debtOverdue = q.paymentType === "credit" && q.dueDate && !q.debtPaid && q.dueDate < todayIsoV;
             return (
-              <div key={q.id} onClick={() => onOpen(q.id)} className="rounded-2xl p-3.5" style={{ backgroundColor: C.card, border: `1px solid ${C.border}` }}>
+              <div key={q.id} onClick={() => onOpen(q.id)} className="rounded-2xl p-3.5" style={{ backgroundColor: debtOverdue ? C.redBg : C.card, border: `1px solid ${debtOverdue ? C.red : C.border}` }}>
                 <div className="flex items-center justify-between mb-1.5">
                   <span className="font-semibold text-sm" style={{ color: C.text }}>{cust?.name || "Khách lẻ"}</span>
-                  <Pill label={st.label} color={st.color} bg={st.bg} />
+                  <div className="flex items-center gap-1.5">
+                    {debtOverdue && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full" style={{ color: "#fff", backgroundColor: C.red }}>NỢ QUÁ HẠN</span>}
+                    <Pill label={st.label} color={st.color} bg={st.bg} />
+                  </div>
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-xs" style={{ color: C.sub }}>{quoteCode(q)} · {new Date(q.createdAt).toLocaleDateString("vi-VN")}</span>
@@ -1484,10 +1758,13 @@ function QuotesTab({ quotes, customers, quoteTotal, onAdd, onOpen, initialMode, 
 }
 
 /* ---------- Quote Detail ---------- */
-function QuoteDetailScreen({ quote, customer, quoteTotal, quoteCost, quoteProfit, onUpdate, onDelete, onEdit, onCopy }) {
+function QuoteDetailScreen({ quote, customer, quoteTotal, quoteCost, quoteProfit, onUpdate, onDelete, onEdit, onCopy, onMarkDebtPaid }) {
   const [expandedRev, setExpandedRev] = useState(null);
   if (!quote) return null;
   const st = getStatusMeta(quote.status);
+  const todayIsoV = isoDay(new Date());
+  const isDebt = quote.paymentType === "credit";
+  const debtOverdue = isDebt && quote.dueDate && !quote.debtPaid && quote.dueDate < todayIsoV;
   const setStatus = (status) => {
     let progress = quote.progress || 0;
     if (status === "won" && !quote.progress) progress = 0;
@@ -1529,6 +1806,33 @@ function QuoteDetailScreen({ quote, customer, quoteTotal, quoteCost, quoteProfit
           </a>
         )}
       </div>
+
+      {isDebt && (
+        <div
+          className="rounded-2xl p-3.5 mb-4"
+          style={{
+            backgroundColor: debtOverdue ? C.redBg : C.amberBg,
+            border: `1px solid ${debtOverdue ? C.red : C.amber}`,
+          }}
+        >
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-xs font-bold flex items-center gap-1.5" style={{ color: debtOverdue ? C.red : C.amber }}>
+              💰 {quote.debtPaid ? "Công nợ - đã thu" : debtOverdue ? "Công nợ - QUÁ HẠN" : "Công nợ - chưa thu"}
+            </span>
+            {quote.dueDate && (
+              <span className="text-xs font-semibold" style={{ color: debtOverdue ? C.red : C.amber }}>
+                Hạn {new Date(quote.dueDate).toLocaleDateString("vi-VN")}
+              </span>
+            )}
+          </div>
+          {!quote.dueDate && <div className="text-[11px]" style={{ color: C.sub }}>Không giới hạn thời gian thanh toán</div>}
+          {!quote.debtPaid && (
+            <button onClick={() => onMarkDebtPaid(quote)} className="w-full mt-2 py-2 rounded-xl text-xs font-bold text-white" style={{ backgroundColor: C.green }}>
+              Đánh dấu đã thu công nợ
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Bộ nút hành động - tự động đổi theo trạng thái, trạng thái không còn bấm tự do */}
       {quote.status === "draft" && (
@@ -1681,6 +1985,8 @@ function QuoteFormScreen({ existing, presetCustomer, revising, customers, produc
   const [customerId, setCustomerId] = useState(existing?.customerId || presetCustomer || "");
   const [items, setItems] = useState(existing?.items || []);
   const [note, setNote] = useState(existing?.note || "");
+  const [paymentType, setPaymentType] = useState(existing?.paymentType || "cash");
+  const [dueDate, setDueDate] = useState(existing?.dueDate || "");
   const [picking, setPicking] = useState(false);
   const [pq, setPq] = useState("");
   const [quickCust, setQuickCust] = useState(false);
@@ -1748,6 +2054,13 @@ function QuoteFormScreen({ existing, presetCustomer, revising, customers, produc
       progress: 0,
       items,
       note,
+      paymentType,
+      dueDate: paymentType === "credit" ? (dueDate || null) : null,
+      debtPaid: paymentType === "credit" ? (existing?.debtPaid || false) : false,
+      debtWeekBeforeNotifId: existing?.debtWeekBeforeNotifId || null,
+      debtOverdueNotifId: existing?.debtOverdueNotifId || null,
+      debtWeekBeforeTried: existing?.dueDate === dueDate ? existing?.debtWeekBeforeTried : false,
+      debtLastNotifDate: existing?.dueDate === dueDate ? existing?.debtLastNotifDate : null,
     });
   };
 
@@ -1836,6 +2149,21 @@ function QuoteFormScreen({ existing, presetCustomer, revising, customers, produc
         </div>
       )}
 
+      <Field label="Hình thức thanh toán">
+        <div className="flex gap-2">
+          <button type="button" onClick={() => setPaymentType("cash")} className="flex-1 py-2.5 rounded-xl text-xs font-bold" style={{ backgroundColor: paymentType === "cash" ? C.navy : C.neutralBg, color: paymentType === "cash" ? "#fff" : C.sub }}>
+            Tiền mặt
+          </button>
+          <button type="button" onClick={() => setPaymentType("credit")} className="flex-1 py-2.5 rounded-xl text-xs font-bold" style={{ backgroundColor: paymentType === "credit" ? C.navy : C.neutralBg, color: paymentType === "credit" ? "#fff" : C.sub }}>
+            Công nợ
+          </button>
+        </div>
+      </Field>
+      {paymentType === "credit" && (
+        <Field label="Hạn thanh toán (không bắt buộc - để trống nếu không giới hạn)">
+          <TextInput type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
+        </Field>
+      )}
       <Field label="Ghi chú"><TextArea rows={2} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Ghi chú cho báo giá..." /></Field>
 
       <div className="rounded-2xl p-4 mb-5 flex items-center justify-between" style={{ backgroundColor: C.navy }}>
@@ -2002,6 +2330,7 @@ function TasksTab({ tasks, onAdd, onEdit, onToggle }) {
                     <span className="text-[10px] font-semibold flex items-center gap-1" style={{ color: C.sub }}><Clock size={10} /> {t.time}</span>
                   )}
                   {t._overdue && <span className="text-[10px] font-bold" style={{ color: C.red }}>Quá hạn</span>}
+                  {t._overdue && t.overdueNotifDate && <span className="text-[10px] font-bold flex items-center gap-0.5" style={{ color: C.amber }}><Bell size={9} /> Đang nhắc mỗi 30'</span>}
                 </div>
               </div>
               <button onClick={() => onEdit(t)}><ChevronRight size={16} color={C.sub} /></button>
@@ -2036,8 +2365,8 @@ function TaskForm({ existing, presetDate, onSave, onCancel, onDelete }) {
   };
 
   return (
-    <div>
-      <Field label="Tên công việc *"><TextInput value={title} onChange={(e) => setTitle(e.target.value)} placeholder="VD: Gọi lại khách hàng ABC" autoFocus /></Field>
+    <div className="px-5 py-5 relative h-full">
+      <Field label="Tên công việc *"><TextInput value={title} onChange={(e) => setTitle(e.target.value)} placeholder="VD: Gọi lại khách hàng ABC" /></Field>
 
       <Field label="Loại">
         <div className="flex gap-2">
@@ -2075,14 +2404,33 @@ function TaskForm({ existing, presetDate, onSave, onCancel, onDelete }) {
 }
 
 /* ---------------------------------- SETTINGS SCREEN ---------------------------------- */
-function SettingsScreen({ themeMode, accentTone, onSetThemeMode, onSetAccentTone, systemPrefersDark }) {
+function SettingsScreen({ themeMode, accentTone, onSetThemeMode, onSetAccentTone, systemPrefersDark, businesses, currentBusinessId, onOpenBusinessSwitch }) {
   const modes = [
     { k: "light", l: "Sáng", icon: Sun },
     { k: "dark", l: "Tối", icon: Moon },
     { k: "system", l: "Theo hệ thống", icon: Smartphone },
   ];
+  const currentBiz = businesses?.find((b) => b.id === currentBusinessId);
   return (
     <div className="px-5 py-5">
+      <div className="text-sm font-bold mb-2.5" style={{ color: C.text }}>Doanh nghiệp / Công việc</div>
+      <button
+        onClick={onOpenBusinessSwitch}
+        className="w-full flex items-center justify-between rounded-2xl p-3.5 mb-6"
+        style={{ backgroundColor: C.card, border: `1px solid ${C.border}` }}
+      >
+        <div className="flex items-center gap-2.5 min-w-0">
+          <div className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0" style={{ backgroundColor: C.navyBg }}>
+            <Building2 size={16} color={C.navy} />
+          </div>
+          <div className="text-left min-w-0">
+            <div className="text-[10px]" style={{ color: C.sub }}>Đang xem</div>
+            <div className="text-sm font-bold truncate" style={{ color: C.text }}>{currentBiz?.name || "Chưa chọn"}</div>
+          </div>
+        </div>
+        <span className="text-xs font-bold flex-shrink-0" style={{ color: C.navy }}>Đổi / Thêm ›</span>
+      </button>
+
       <div className="text-sm font-bold mb-2.5" style={{ color: C.text }}>Chế độ hiển thị</div>
       <div className="flex gap-2 mb-6">
         {modes.map((m) => {
@@ -2126,6 +2474,99 @@ function SettingsScreen({ themeMode, accentTone, onSetThemeMode, onSetAccentTone
           );
         })}
       </div>
+    </div>
+  );
+}
+
+/* ---------------------------------- REPORTS TAB ---------------------------------- */
+/* ---------------------------------- CHUYỂN ĐỔI DOANH NGHIỆP ---------------------------------- */
+function BusinessSwitchScreen({ businesses, currentBusinessId, onSwitch, onAdd, onRename, onDelete }) {
+  const [adding, setAdding] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [renamingId, setRenamingId] = useState(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+
+  const submitAdd = () => {
+    if (!newName.trim()) return;
+    onAdd(newName.trim());
+    setNewName("");
+    setAdding(false);
+  };
+  const submitRename = (id) => {
+    if (!renameValue.trim()) return;
+    onRename(id, renameValue.trim());
+    setRenamingId(null);
+  };
+
+  return (
+    <div className="px-5 py-5">
+      <div className="text-xs mb-4" style={{ color: C.sub }}>
+        Mỗi doanh nghiệp/công việc có khách hàng, sản phẩm, báo giá, công việc hoàn toàn tách biệt với nhau.
+      </div>
+
+      <div className="flex flex-col gap-2.5 mb-5">
+        {businesses.map((b) => {
+          const isCurrent = b.id === currentBusinessId;
+          const isRenaming = renamingId === b.id;
+          return (
+            <div key={b.id} className="rounded-2xl p-3.5" style={{ backgroundColor: isCurrent ? C.navyBg : C.card, border: `1px solid ${isCurrent ? C.navy : C.border}` }}>
+              {isRenaming ? (
+                <div>
+                  <TextInput value={renameValue} onChange={(e) => setRenameValue(e.target.value)} autoFocus style={{ marginBottom: 8 }} />
+                  <div className="flex gap-2">
+                    <button onClick={() => submitRename(b.id)} className="flex-1 py-2 rounded-lg text-xs font-bold text-white" style={{ backgroundColor: C.navy }}>Lưu</button>
+                    <button onClick={() => setRenamingId(null)} className="flex-1 py-2 rounded-lg text-xs font-bold" style={{ backgroundColor: C.neutralBg, color: C.sub }}>Huỷ</button>
+                  </div>
+                </div>
+              ) : confirmDeleteId === b.id ? (
+                <div>
+                  <div className="text-xs font-semibold mb-2" style={{ color: C.red }}>
+                    Xoá "{b.name}" sẽ xoá VĨNH VIỄN toàn bộ khách hàng, sản phẩm, báo giá, công việc thuộc doanh nghiệp này. Chắc chắn chứ?
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={() => { onDelete(b.id); setConfirmDeleteId(null); }} className="flex-1 py-2 rounded-lg text-xs font-bold text-white" style={{ backgroundColor: C.red }}>Xoá vĩnh viễn</button>
+                    <button onClick={() => setConfirmDeleteId(null)} className="flex-1 py-2 rounded-lg text-xs font-bold" style={{ backgroundColor: C.neutralBg, color: C.sub }}>Huỷ</button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-center justify-between">
+                  <button onClick={() => onSwitch(b.id)} className="flex items-center gap-2 flex-1 text-left min-w-0">
+                    <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0" style={{ backgroundColor: isCurrent ? C.navy : C.neutralBg }}>
+                      {isCurrent ? <Check size={15} color="#fff" /> : <Building2 size={15} color={C.sub} />}
+                    </div>
+                    <span className="text-sm font-semibold truncate" style={{ color: C.text }}>{b.name}</span>
+                  </button>
+                  <div className="flex items-center gap-1 flex-shrink-0">
+                    <button onClick={() => { setRenamingId(b.id); setRenameValue(b.name); }} className="w-8 h-8 rounded-full flex items-center justify-center" style={{ backgroundColor: C.neutralBg }}>
+                      <Pencil size={13} color={C.sub} />
+                    </button>
+                    {businesses.length > 1 && (
+                      <button onClick={() => setConfirmDeleteId(b.id)} className="w-8 h-8 rounded-full flex items-center justify-center" style={{ backgroundColor: C.redBg }}>
+                        <Trash2 size={13} color={C.red} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {adding ? (
+        <div className="rounded-2xl p-3.5" style={{ backgroundColor: C.card, border: `1px solid ${C.border}` }}>
+          <TextInput value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="Tên doanh nghiệp/công việc mới" autoFocus style={{ marginBottom: 8 }} />
+          <div className="flex gap-2">
+            <button onClick={submitAdd} className="flex-1 py-2 rounded-lg text-xs font-bold text-white" style={{ backgroundColor: C.navy }}>Tạo & chuyển sang</button>
+            <button onClick={() => setAdding(false)} className="flex-1 py-2 rounded-lg text-xs font-bold" style={{ backgroundColor: C.neutralBg, color: C.sub }}>Huỷ</button>
+          </div>
+        </div>
+      ) : (
+        <button onClick={() => setAdding(true)} className="w-full py-3 rounded-2xl font-bold text-sm flex items-center justify-center gap-1.5" style={{ backgroundColor: C.neutralBg, color: C.navy }}>
+          <Plus size={15} /> Thêm doanh nghiệp/công việc mới
+        </button>
+      )}
     </div>
   );
 }
