@@ -6,6 +6,7 @@ import "./index.css";
 // Tác dụng: đăng ký plugin thông báo với Capacitor để window.Capacitor.Plugins.LocalNotifications
 // có sẵn khi App.jsx gọi tới (App.jsx không import trực tiếp để không phá bản xem trước trong Claude).
 import "@capacitor/local-notifications";
+import "@capacitor/app";
 
 ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>

@@ -83,6 +83,7 @@ const uid = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(3
    (import trực tiếp sẽ làm hỏng bản xem trước trong Claude, vì thư viện đó không tồn tại ở đó).
    Trong app thật, main.jsx đã import gói này 1 lần để đăng ký plugin, nên window.Capacitor.Plugins.LocalNotifications sẽ có sẵn. */
 const getLocalNotif = () => (typeof window !== "undefined" ? window.Capacitor?.Plugins?.LocalNotifications : null);
+const getCapApp = () => (typeof window !== "undefined" ? window.Capacitor?.Plugins?.App : null);
 
 async function requestNotifPermission() {
   try {
@@ -120,6 +121,7 @@ async function scheduleTaskNotification(task) {
           title: "⏰ Nhắc việc hằng ngày",
           body: task.title,
           schedule: { on: { hour: hh, minute: mm }, repeats: true, allowWhileIdle: true },
+          extra: { taskId: task.id },
         }],
       });
     } else {
@@ -132,6 +134,7 @@ async function scheduleTaskNotification(task) {
           title: "⏰ Nhắc công việc",
           body: task.title,
           schedule: { at: when, allowWhileIdle: true },
+          extra: { taskId: task.id },
         }],
       });
     }
@@ -171,6 +174,7 @@ async function scheduleOverdueBatch(task) {
         title: "🔴 Việc quá hạn chưa hoàn thành",
         body: task.title,
         schedule: { at: new Date(cursor), allowWhileIdle: true },
+        extra: { taskId: task.id },
       });
       cursor = new Date(cursor.getTime() + 30 * 60000);
     }
@@ -206,6 +210,7 @@ async function scheduleDebtWeekBefore(quote, custName) {
         title: "💰 Sắp đến hạn thu công nợ",
         body: `${custName} - hạn ${due.toLocaleDateString("vi-VN")}`,
         schedule: { at: remindAt, allowWhileIdle: true },
+        extra: { quoteId: quote.id },
       }],
     });
     return id;
@@ -227,6 +232,7 @@ async function scheduleDebtOverdueDaily(quote, custName) {
         title: "🔴 Công nợ quá hạn thanh toán",
         body: `${custName} - đã quá hạn, cần thu hồi`,
         schedule: { at, allowWhileIdle: true },
+        extra: { quoteId: quote.id },
       }],
     });
     return id;
@@ -601,6 +607,57 @@ export default function PersonalCRM() {
     });
   }, []);
 
+  // Bấm vào thông báo (công việc/công nợ) -> tự chuyển đúng tới màn tương ứng, kể cả khi mở app từ trạng thái đóng.
+  // Dùng ref để luôn đọc được tasks/quotes/businesses mới nhất, không bị "đóng băng" theo lần render lúc đăng ký.
+  const tasksRef = useRef(tasks);
+  useEffect(() => { tasksRef.current = tasks; }, [tasks]);
+  const quotesRef = useRef(quotes);
+  useEffect(() => { quotesRef.current = quotes; }, [quotes]);
+  useEffect(() => {
+    const LN = getLocalNotif();
+    if (!LN) return;
+    const sub = LN.addListener("localNotificationActionPerformed", (payload) => {
+      const extra = payload?.notification?.extra;
+      if (!extra) return;
+      if (extra.taskId) {
+        const t = tasksRef.current.find((x) => x.id === extra.taskId);
+        if (t) {
+          if (t.businessId && t.businessId !== currentBusinessId) setCurrentBusinessId(t.businessId);
+          setTab("tasks");
+          openScreen({ type: "taskForm", data: t });
+        }
+      } else if (extra.quoteId) {
+        const q = quotesRef.current.find((x) => x.id === extra.quoteId);
+        if (q) {
+          if (q.businessId && q.businessId !== currentBusinessId) setCurrentBusinessId(q.businessId);
+          setTab("quotes");
+          openScreen({ type: "quoteDetail", id: q.id });
+        }
+      }
+    });
+    return () => { sub?.remove?.(); };
+  }, [currentBusinessId]);
+
+  // Nút Back vật lý của điện thoại (Android): đóng màn/khung đang mở trước, về Tổng quan sau,
+  // chỉ thoát hẳn app khi đã ở Tổng quan và không còn gì để đóng - đúng hành vi chuẩn của app Android.
+  const screenOpenRef = useRef(screenOpen);
+  useEffect(() => { screenOpenRef.current = screenOpen; }, [screenOpen]);
+  const sheetOpenRef = useRef(sheetOpen);
+  useEffect(() => { sheetOpenRef.current = sheetOpen; }, [sheetOpen]);
+  const tabRef = useRef(tab);
+  useEffect(() => { tabRef.current = tab; }, [tab]);
+  useEffect(() => {
+    const CapApp = getCapApp();
+    if (!CapApp) return;
+    const sub = CapApp.addListener("backButton", () => {
+      if (screenOpenRef.current) { closeScreen(); return; }
+      if (sheetOpenRef.current) { closeSheet(); return; }
+      if (tabRef.current !== "home") { goTab("home"); return; }
+      CapApp.exitApp();
+    });
+    return () => { sub?.remove?.(); };
+  }, []);
+
   useEffect(() => {
     if (!loaded) return;
     const t = setTimeout(() => saveAll({ customers, products, quotes, tasks, themeMode, accentTone, businesses, currentBusinessId }), 350);
@@ -695,12 +752,32 @@ export default function PersonalCRM() {
     cancelDebtNotifs(q);
     upsertQuote({ ...q, debtPaid: true, debtWeekBeforeNotifId: null, debtOverdueNotifId: null });
   };
+  // Tạo nhắc hẹn từ ghi chú công nợ -> tự copy thành 1 công việc bên tab Công việc, gắn sẵn khách hàng liên quan
+  const createDebtReminderTask = (quote, noteText, dateTimeIso) => {
+    const [dPart, tPart] = dateTimeIso.split("T");
+    const newTask = {
+      id: uid(),
+      title: noteText?.trim() ? `Nhắc công nợ: ${noteText.trim()}` : `Nhắc thu công nợ - ${quoteCode(quote)}`,
+      type: "once",
+      date: dPart,
+      time: tPart ? tPart.slice(0, 5) : null,
+      note: noteText || "",
+      customerId: quote.customerId,
+      done: false,
+      completedDates: [],
+      createdAt: todayISO(),
+      businessId: quote.businessId || currentBusinessId,
+    };
+    saveTaskWithNotification(newTask);
+    upsertQuote({ ...quote, debtNote: noteText, debtReminderTaskId: newTask.id });
+    showToast("Đã tạo nhắc hẹn trong Công việc");
+  };
   // Rà soát công nợ mỗi ngày: nhắc trước hạn 1 tuần (1 lần), và nhắc quá hạn mỗi ngày cho đến khi đã thu
   useEffect(() => {
     if (!loaded) return;
     const today = isoDay(new Date());
     quotes.forEach((q) => {
-      if (q.paymentType === "credit" && q.dueDate && !q.debtPaid) {
+      if (q.paymentType === "credit" && q.status === "done" && q.dueDate && !q.debtPaid) {
         const cust = customers.find((c) => c.id === q.customerId);
         const custName = cust?.name || "Khách lẻ";
         if (!q.debtWeekBeforeNotifId && !q.debtWeekBeforeTried) {
@@ -729,8 +806,11 @@ export default function PersonalCRM() {
       items: q.items.map((it) => ({ ...it })),
       note: q.note || "",
       paymentType: q.paymentType || "cash",
+      debtDays: q.debtDays || null,
       dueDate: null,
       debtPaid: false,
+      debtNote: "",
+      debtReminderTaskId: null,
     };
     upsertQuote(newQ);
     openScreen({ type: "quoteDetail", id: newQ.id });
@@ -1108,6 +1188,7 @@ export default function PersonalCRM() {
                   onEdit={(q, revising) => openScreen({ type: "quoteForm", quote: q, revising })}
                   onCopy={copyQuote}
                   onMarkDebtPaid={markDebtPaid}
+                  onCreateDebtReminder={createDebtReminderTask}
                 />
               )}
             </Screen>
@@ -1152,7 +1233,7 @@ export default function PersonalCRM() {
                     onSaveCustomer={upsertCustomer}
                     onSave={(q) => {
                       // Nếu hạn thanh toán vừa đổi/xoá, huỷ lịch nhắc công nợ cũ trước (cơ chế rà soát sẽ tự đặt lại nếu cần)
-                      if (screen.quote && screen.quote.dueDate !== q.dueDate) cancelDebtNotifs(screen.quote);
+                      if (screen.quote && screen.quote.debtDays !== q.debtDays) cancelDebtNotifs(screen.quote);
                       upsertQuote(q);
                       closeScreen();
                       showToast("Đã lưu báo giá");
@@ -1501,7 +1582,16 @@ function CustomerForm({ existing, existingGroups, onSave, onCancel }) {
 }
 
 function CustomerDetailScreen({ customer, quotesList, tasksList, revenue, quoteTotal, onEdit, onDelete, onOpenQuote, onNewQuote, onOpenTask, onNewTask }) {
+  const [showDebt, setShowDebt] = useState(false);
   if (!customer) return null;
+  // Công nợ: chỉ tính các đơn đã Hoàn thành 100%, thanh toán kiểu Công nợ, chưa thu.
+  // Ngày ghi nhận công nợ = ngày hoàn thành đơn hàng (không phải ngày tạo báo giá).
+  const debtOrders = quotesList.filter((q) => q.paymentType === "credit" && q.status === "done" && !q.debtPaid);
+  const debtTotal = debtOrders.reduce((s, q) => s + quoteTotal(q), 0);
+  const daysInDebt = (q) => {
+    if (!q.completedAt) return 0;
+    return Math.max(0, Math.floor((Date.now() - new Date(q.completedAt).getTime()) / 86400000));
+  };
   return (
     <div className="px-5 py-5">
       <div className="rounded-2xl p-4 mb-5" style={{ backgroundColor: C.card, border: `1px solid ${C.border}` }}>
@@ -1537,6 +1627,35 @@ function CustomerDetailScreen({ customer, quotesList, tasksList, revenue, quoteT
           </button>
         </div>
       </div>
+
+      {debtTotal > 0 && (
+        <div className="mb-5">
+          <button
+            onClick={() => setShowDebt(!showDebt)}
+            className="w-full rounded-2xl p-3.5 flex items-center justify-between"
+            style={{ backgroundColor: C.redBg, border: `1px solid ${C.red}` }}
+          >
+            <div className="text-left">
+              <div className="text-[10px] font-semibold" style={{ color: C.red }}>💰 Công nợ hiện tại ({debtOrders.length} đơn)</div>
+              <div className="text-base font-bold" style={{ color: C.red }}>{money(debtTotal)}</div>
+            </div>
+            <ChevronRight size={16} color={C.red} style={{ transform: showDebt ? "rotate(90deg)" : "none" }} />
+          </button>
+          {showDebt && (
+            <div className="flex flex-col gap-2 mt-2.5">
+              {debtOrders.map((q) => (
+                <div key={q.id} onClick={() => onOpenQuote(q.id)} className="rounded-xl p-3 flex items-center justify-between" style={{ backgroundColor: C.card, border: `1px solid ${C.border}` }}>
+                  <div>
+                    <div className="text-xs font-bold" style={{ color: C.text }}>{quoteCode(q)}</div>
+                    <div className="text-[10px] mt-0.5" style={{ color: C.red }}>{daysInDebt(q)} ngày nợ</div>
+                  </div>
+                  <span className="text-xs font-bold" style={{ color: C.text }}>{money(quoteTotal(q))}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="flex items-center justify-between mb-2.5">
         <div className="text-sm font-bold" style={{ color: C.text }}>Báo giá ({quotesList.length})</div>
@@ -1761,7 +1880,7 @@ function QuotesTab({ quotes, customers, quoteTotal, onAdd, onOpen, initialMode, 
             const cust = customers.find((c) => c.id === q.customerId);
             const st = getStatusMeta(q.status);
             const todayIsoV = isoDay(new Date());
-            const debtOverdue = q.paymentType === "credit" && q.dueDate && !q.debtPaid && q.dueDate < todayIsoV;
+            const debtOverdue = q.paymentType === "credit" && q.status === "done" && q.dueDate && !q.debtPaid && q.dueDate < todayIsoV;
             return (
               <div key={q.id} onClick={() => onOpen(q.id)} className="rounded-2xl p-3.5" style={{ backgroundColor: debtOverdue ? C.redBg : C.card, border: `1px solid ${debtOverdue ? C.red : C.border}` }}>
                 <div className="flex items-center justify-between mb-1.5">
@@ -1785,26 +1904,37 @@ function QuotesTab({ quotes, customers, quoteTotal, onAdd, onOpen, initialMode, 
 }
 
 /* ---------- Quote Detail ---------- */
-function QuoteDetailScreen({ quote, customer, quoteTotal, quoteCost, quoteProfit, onUpdate, onDelete, onEdit, onCopy, onMarkDebtPaid }) {
+function QuoteDetailScreen({ quote, customer, quoteTotal, quoteCost, quoteProfit, onUpdate, onDelete, onEdit, onCopy, onMarkDebtPaid, onCreateDebtReminder }) {
   const [expandedRev, setExpandedRev] = useState(null);
+  const [debtNoteDraft, setDebtNoteDraft] = useState(quote?.debtNote || "");
+  const [reminderAt, setReminderAt] = useState("");
+  useEffect(() => { setDebtNoteDraft(quote?.debtNote || ""); }, [quote?.id]);
   if (!quote) return null;
   const st = getStatusMeta(quote.status);
   const todayIsoV = isoDay(new Date());
-  const isDebt = quote.paymentType === "credit";
+  const isDebt = quote.paymentType === "credit" && quote.status === "done";
   const debtOverdue = isDebt && quote.dueDate && !quote.debtPaid && quote.dueDate < todayIsoV;
   const setStatus = (status) => {
     let progress = quote.progress || 0;
     if (status === "won" && !quote.progress) progress = 0;
     if (status === "done") progress = 100;
-    // Bấm "Chốt" nghĩa là bắt đầu 1 chu kỳ thực hiện mới -> xoá mốc hoàn thành cũ (nếu có)
+    // Bấm "Chốt" nghĩa là bắt đầu 1 chu kỳ thực hiện mới -> xoá mốc hoàn thành cũ và hạn công nợ tính từ đó (nếu có)
     const completedAt = status === "won" ? null : quote.completedAt;
-    onUpdate({ ...quote, status, progress, completedAt });
+    const dueDate = status === "won" ? null : quote.dueDate;
+    onUpdate({ ...quote, status, progress, completedAt, dueDate });
   };
   const setProgress = (progress) => {
     const status = progress >= 100 ? "done" : quote.status === "done" ? "won" : quote.status;
     // Tự động ghi lại thời điểm hoàn thành thực tế ngay lúc đạt 100% (không dùng ngày tạo báo giá)
     const completedAt = progress >= 100 ? (quote.completedAt || todayISO()) : quote.completedAt;
-    onUpdate({ ...quote, progress, status, completedAt });
+    // Tự tính hạn thanh toán công nợ = ngày hoàn thành + số ngày nợ, ngay khi đơn đạt 100% lần đầu
+    let dueDate = quote.dueDate;
+    if (progress >= 100 && quote.paymentType === "credit" && quote.debtDays && !quote.dueDate) {
+      const d = new Date(completedAt);
+      d.setDate(d.getDate() + Number(quote.debtDays));
+      dueDate = isoDay(d);
+    }
+    onUpdate({ ...quote, progress, status, completedAt, dueDate });
   };
   const showProgress = quote.status === "won" || quote.status === "done";
 
@@ -1852,12 +1982,41 @@ function QuoteDetailScreen({ quote, customer, quoteTotal, quoteCost, quoteProfit
               </span>
             )}
           </div>
+          {quote.debtDays > 0 && <div className="text-[11px] mb-1" style={{ color: C.sub }}>Số ngày nợ: {quote.debtDays} ngày (tự tính từ ngày hoàn thành)</div>}
           {!quote.dueDate && <div className="text-[11px]" style={{ color: C.sub }}>Không giới hạn thời gian thanh toán</div>}
           {!quote.debtPaid && (
             <button onClick={() => onMarkDebtPaid(quote)} className="w-full mt-2 py-2 rounded-xl text-xs font-bold text-white" style={{ backgroundColor: C.green }}>
               Đánh dấu đã thu công nợ
             </button>
           )}
+
+          <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${debtOverdue ? C.red : C.amber}40` }}>
+            <label className="text-[10px] font-semibold mb-1.5 block" style={{ color: C.sub }}>Ghi chú công nợ</label>
+            <TextArea
+              rows={2}
+              value={debtNoteDraft}
+              onChange={(e) => setDebtNoteDraft(e.target.value)}
+              onBlur={() => { if (debtNoteDraft !== (quote.debtNote || "")) onUpdate({ ...quote, debtNote: debtNoteDraft }); }}
+              placeholder="VD: Khách hẹn trả góp 2 đợt, đợt 1 ngày..."
+              style={{ backgroundColor: C.card }}
+            />
+            <label className="text-[10px] font-semibold mb-1.5 mt-2.5 block" style={{ color: C.sub }}>Đặt nhắc hẹn từ ghi chú này (tự tạo công việc tương ứng)</label>
+            <div className="flex gap-2">
+              <TextInput type="datetime-local" value={reminderAt} onChange={(e) => setReminderAt(e.target.value)} style={{ backgroundColor: C.card, flex: 1 }} />
+              <button
+                onClick={() => {
+                  if (!reminderAt) return;
+                  onCreateDebtReminder(quote, debtNoteDraft, reminderAt);
+                  setReminderAt("");
+                }}
+                className="px-3.5 rounded-xl text-xs font-bold text-white flex items-center gap-1.5 flex-shrink-0"
+                style={{ backgroundColor: C.navy }}
+              >
+                <Bell size={13} /> Tạo
+              </button>
+            </div>
+            {quote.debtReminderTaskId && <div className="text-[10px] mt-1.5" style={{ color: C.sub }}>Đã tạo nhắc hẹn trong mục Công việc</div>}
+          </div>
         </div>
       )}
 
@@ -2013,7 +2172,7 @@ function QuoteFormScreen({ existing, presetCustomer, revising, customers, produc
   const [items, setItems] = useState(existing?.items || []);
   const [note, setNote] = useState(existing?.note || "");
   const [paymentType, setPaymentType] = useState(existing?.paymentType || "cash");
-  const [dueDate, setDueDate] = useState(existing?.dueDate || "");
+  const [debtDays, setDebtDays] = useState(existing?.debtDays || "");
   const [picking, setPicking] = useState(false);
   const [pq, setPq] = useState("");
   const [quickCust, setQuickCust] = useState(false);
@@ -2082,12 +2241,16 @@ function QuoteFormScreen({ existing, presetCustomer, revising, customers, produc
       items,
       note,
       paymentType,
-      dueDate: paymentType === "credit" ? (dueDate || null) : null,
+      // Hạn thanh toán được tự tính khi đơn Hoàn thành (= ngày hoàn thành + số ngày nợ), không đặt tay ở đây.
+      debtDays: paymentType === "credit" ? (debtDays ? Number(debtDays) : null) : null,
+      dueDate: paymentType === "credit" ? existing?.dueDate || null : null,
       debtPaid: paymentType === "credit" ? (existing?.debtPaid || false) : false,
+      debtNote: paymentType === "credit" ? (existing?.debtNote || "") : "",
+      debtReminderTaskId: paymentType === "credit" ? (existing?.debtReminderTaskId || null) : null,
       debtWeekBeforeNotifId: existing?.debtWeekBeforeNotifId || null,
       debtOverdueNotifId: existing?.debtOverdueNotifId || null,
-      debtWeekBeforeTried: existing?.dueDate === dueDate ? existing?.debtWeekBeforeTried : false,
-      debtLastNotifDate: existing?.dueDate === dueDate ? existing?.debtLastNotifDate : null,
+      debtWeekBeforeTried: existing?.debtDays === (debtDays ? Number(debtDays) : null) ? existing?.debtWeekBeforeTried : false,
+      debtLastNotifDate: existing?.debtDays === (debtDays ? Number(debtDays) : null) ? existing?.debtLastNotifDate : null,
     });
   };
 
@@ -2139,25 +2302,26 @@ function QuoteFormScreen({ existing, presetCustomer, revising, customers, produc
               </div>
               <div className="flex items-center gap-2 mb-2">
                 <div className="flex items-center rounded-lg" style={{ backgroundColor: C.neutralBg }}>
-                  <button onClick={() => updateItem(i, { qty: Math.max(1, it.qty - 1) })} className="w-7 h-7 flex items-center justify-center flex-shrink-0"><Minus size={12} color={C.text} /></button>
+                  <button onClick={() => updateItem(i, { qty: Math.max(0.01, Math.round((it.qty - 1) * 100) / 100) })} className="w-7 h-7 flex items-center justify-center flex-shrink-0"><Minus size={12} color={C.text} /></button>
                   <input
                     type="number"
-                    inputMode="numeric"
-                    min="1"
+                    inputMode="decimal"
+                    step="any"
+                    min="0.01"
                     value={it.qty}
                     onChange={(e) => {
                       const v = e.target.value;
                       updateItem(i, { qty: v === "" ? "" : Number(v) });
                     }}
                     onBlur={(e) => {
-                      const v = Math.max(1, Math.round(Number(e.target.value)) || 1);
+                      const v = Math.max(0.01, Number(e.target.value) || 1);
                       updateItem(i, { qty: v });
                     }}
                     onFocus={(e) => e.target.select()}
                     className="text-xs font-bold text-center"
-                    style={{ width: 40, background: "transparent", border: "none", outline: "none", color: C.text, MozAppearance: "textfield" }}
+                    style={{ width: 52, background: "transparent", border: "none", outline: "none", color: C.text, MozAppearance: "textfield" }}
                   />
-                  <button onClick={() => updateItem(i, { qty: (Number(it.qty) || 0) + 1 })} className="w-7 h-7 flex items-center justify-center flex-shrink-0"><Plus size={12} color={C.text} /></button>
+                  <button onClick={() => updateItem(i, { qty: Math.round(((Number(it.qty) || 0) + 1) * 100) / 100 })} className="w-7 h-7 flex items-center justify-center flex-shrink-0"><Plus size={12} color={C.text} /></button>
                 </div>
                 <span className="text-[11px]" style={{ color: C.sub }}>{it.unit}</span>
               </div>
@@ -2187,8 +2351,18 @@ function QuoteFormScreen({ existing, presetCustomer, revising, customers, produc
         </div>
       </Field>
       {paymentType === "credit" && (
-        <Field label="Hạn thanh toán (không bắt buộc - để trống nếu không giới hạn)">
-          <TextInput type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
+        <Field label="Số ngày nợ (không bắt buộc - để trống nếu không giới hạn)">
+          <TextInput
+            type="number"
+            inputMode="numeric"
+            min="1"
+            value={debtDays}
+            onChange={(e) => setDebtDays(e.target.value)}
+            placeholder="VD: 30"
+          />
+          <div className="text-[10px] mt-1.5" style={{ color: C.sub }}>
+            Hạn thanh toán sẽ tự tính = ngày hoàn thành đơn hàng + số ngày này (chỉ tính khi đơn Hoàn thành 100%).
+          </div>
         </Field>
       )}
       <Field label="Ghi chú"><TextArea rows={2} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Ghi chú cho báo giá..." /></Field>
