@@ -3,6 +3,7 @@
 	"appName": "HTP CRM",
 	"webDir": "dist",
 	"packageClassList": [
+		"AppPlugin",
 		"LocalNotificationsPlugin"
 	]
 }
