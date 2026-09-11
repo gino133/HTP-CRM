@@ -261,7 +261,10 @@ const monthKey = (d) => {
 const quoteCode = (q) => q.code + (q.revision > 0 ? `-R${q.revision}` : "");
 // Ngày dùng để tính doanh thu/lợi nhuận: ưu tiên ngày hoàn thành thực tế (đơn đã Hoàn thành),
 // nếu chưa hoàn thành (đang Chốt) thì tạm dùng ngày tạo báo giá làm mốc.
-const revenueDate = (q) => q.completedAt || q.createdAt;
+// Đơn thanh toán Tiền mặt: ghi nhận doanh thu ngay khi hoàn thành.
+// Đơn Công nợ: CHỈ ghi nhận doanh thu/lợi nhuận sau khi đã thu được nợ - ngày ghi nhận là ngày thu nợ.
+const isRevenueRecognized = (q) => q.paymentType !== "credit" || q.debtPaid;
+const revenueDate = (q) => (q.paymentType === "credit" ? (q.debtPaidAt || q.completedAt || q.createdAt) : (q.completedAt || q.createdAt));
 // Sinh mã báo giá mới theo quy tắc BG/YYYY-XXX, tăng dần theo năm hiện tại
 const nextQuoteCode = (allQuotes) => {
   const year = new Date().getFullYear();
@@ -278,6 +281,8 @@ const isoDay = (d) => {
   const dt = new Date(d);
   return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
 };
+// Việc lặp lại hằng ngày chỉ tính là "đang lặp" trong khoảng [startDate, endDate] (endDate bỏ trống = vô hạn về sau)
+const isDailyActiveOn = (t, dayIso) => (!t.startDate || dayIso >= t.startDate) && (!t.endDate || dayIso <= t.endDate);
 const addDays = (d, n) => { const dt = new Date(d); dt.setDate(dt.getDate() + n); return dt; };
 const startOfWeek = (d) => { const dt = new Date(d); const day = (dt.getDay() + 6) % 7; return addDays(dt, -day); }; // Monday
 const WEEKDAY = ["CN", "T2", "T3", "T4", "T5", "T6", "T7"];
@@ -683,7 +688,7 @@ export default function PersonalCRM() {
   const quoteCost = (q) => q.items.reduce((s, it) => s + it.qty * it.unitCost, 0);
   const quoteProfit = (q) => quoteTotal(q) - quoteCost(q);
 
-  const countedQuotes = useMemo(() => scopedQuotes.filter((q) => q.status === "won" || q.status === "done"), [scopedQuotes]);
+  const countedQuotes = useMemo(() => scopedQuotes.filter((q) => (q.status === "won" || q.status === "done") && isRevenueRecognized(q)), [scopedQuotes]);
 
   const thisMonthKey = monthKey(new Date());
   const monthRevenue = useMemo(
@@ -705,7 +710,7 @@ export default function PersonalCRM() {
   const todayIso = isoDay(new Date());
   const todayTasks = useMemo(() => {
     const once = scopedTasks.filter((t) => t.type === "once" && t.date === todayIso);
-    const daily = scopedTasks.filter((t) => t.type === "daily");
+    const daily = scopedTasks.filter((t) => t.type === "daily" && isDailyActiveOn(t, todayIso));
     const merged = [...once, ...daily].map((t) => ({
       ...t,
       _done: t.type === "daily" ? (t.completedDates || []).includes(todayIso) : !!t.done,
@@ -750,7 +755,7 @@ export default function PersonalCRM() {
   };
   const markDebtPaid = (q) => {
     cancelDebtNotifs(q);
-    upsertQuote({ ...q, debtPaid: true, debtWeekBeforeNotifId: null, debtOverdueNotifId: null });
+    upsertQuote({ ...q, debtPaid: true, debtPaidAt: todayISO(), debtWeekBeforeNotifId: null, debtOverdueNotifId: null });
   };
   // Tạo nhắc hẹn từ ghi chú công nợ -> tự copy thành 1 công việc bên tab Công việc, gắn sẵn khách hàng liên quan
   const createDebtReminderTask = (quote, noteText, dateTimeIso) => {
@@ -1918,10 +1923,12 @@ function QuoteDetailScreen({ quote, customer, quoteTotal, quoteCost, quoteProfit
     let progress = quote.progress || 0;
     if (status === "won" && !quote.progress) progress = 0;
     if (status === "done") progress = 100;
-    // Bấm "Chốt" nghĩa là bắt đầu 1 chu kỳ thực hiện mới -> xoá mốc hoàn thành cũ và hạn công nợ tính từ đó (nếu có)
+    // Bấm "Chốt" nghĩa là bắt đầu 1 chu kỳ thực hiện mới -> xoá mốc hoàn thành cũ, hạn công nợ và trạng thái đã thu (nếu có)
     const completedAt = status === "won" ? null : quote.completedAt;
     const dueDate = status === "won" ? null : quote.dueDate;
-    onUpdate({ ...quote, status, progress, completedAt, dueDate });
+    const debtPaid = status === "won" ? false : quote.debtPaid;
+    const debtPaidAt = status === "won" ? null : quote.debtPaidAt;
+    onUpdate({ ...quote, status, progress, completedAt, dueDate, debtPaid, debtPaidAt });
   };
   const setProgress = (progress) => {
     const status = progress >= 100 ? "done" : quote.status === "done" ? "won" : quote.status;
@@ -2171,6 +2178,7 @@ function QuoteFormScreen({ existing, presetCustomer, revising, customers, produc
   const [customerId, setCustomerId] = useState(existing?.customerId || presetCustomer || "");
   const [items, setItems] = useState(existing?.items || []);
   const [note, setNote] = useState(existing?.note || "");
+  const [quoteDate, setQuoteDate] = useState(existing?.createdAt ? isoDay(new Date(existing.createdAt)) : "");
   const [paymentType, setPaymentType] = useState(existing?.paymentType || "cash");
   const [debtDays, setDebtDays] = useState(existing?.debtDays || "");
   const [picking, setPicking] = useState(false);
@@ -2235,7 +2243,7 @@ function QuoteFormScreen({ existing, presetCustomer, revising, customers, produc
       revision,
       history,
       customerId,
-      createdAt: existing?.createdAt || todayISO(),
+      createdAt: quoteDate ? new Date(quoteDate + "T12:00:00").toISOString() : (existing?.createdAt || todayISO()),
       status,
       progress: 0,
       items,
@@ -2283,6 +2291,10 @@ function QuoteFormScreen({ existing, presetCustomer, revising, customers, produc
             </div>
           </div>
         )}
+      </Field>
+
+      <Field label="Ngày báo giá (để trống = hôm nay)">
+        <TextInput type="date" value={quoteDate} onChange={(e) => setQuoteDate(e.target.value)} />
       </Field>
 
       <div className="flex items-center justify-between mb-2.5">
@@ -2417,7 +2429,7 @@ function TasksTab({ tasks, customers, onAdd, onEdit, onToggle }) {
 
   const dayTasks = useMemo(() => {
     const once = tasks.filter((t) => t.type === "once" && t.date === selIso);
-    const daily = tasks.filter((t) => t.type === "daily");
+    const daily = tasks.filter((t) => t.type === "daily" && isDailyActiveOn(t, selIso));
     const merged = [...once, ...daily].map((t) => ({
       ...t,
       _done: t.type === "daily" ? (t.completedDates || []).includes(selIso) : !!t.done,
@@ -2429,7 +2441,7 @@ function TasksTab({ tasks, customers, onAdd, onEdit, onToggle }) {
 
   const hasTask = (d) => {
     const iso = isoDay(d);
-    return tasks.some((t) => (t.type === "once" && t.date === iso) || t.type === "daily");
+    return tasks.some((t) => (t.type === "once" && t.date === iso) || (t.type === "daily" && isDailyActiveOn(t, iso)));
   };
 
   const jumpTo = (date) => { setSelected(date); setAnchor(startOfWeek(date)); };
@@ -2555,20 +2567,26 @@ function TaskForm({ existing, presetDate, presetCustomerId, customers, onSave, o
   const [time, setTime] = useState(existing?.time || "");
   const [note, setNote] = useState(existing?.note || "");
   const [customerId, setCustomerId] = useState(existing?.customerId || presetCustomerId || "");
+  const [endDate, setEndDate] = useState(existing?.endDate || "");
 
   const submit = () => {
     if (!title.trim()) return;
+    const createdAt = existing?.createdAt || todayISO();
     onSave({
       id: existing?.id || uid(),
       title: title.trim(),
       type,
       date: type === "once" ? date : null,
+      // Việc lặp lại hằng ngày: ngày bắt đầu luôn là ngày tạo công việc (không lặp về quá khứ trước đó),
+      // giữ nguyên ngày bắt đầu gốc khi sửa lại sau này.
+      startDate: type === "daily" ? (existing?.startDate || isoDay(new Date(createdAt))) : null,
+      endDate: type === "daily" ? (endDate || null) : null,
       time: time || null,
       note,
       customerId: customerId || null,
       done: existing?.done || false,
       completedDates: existing?.completedDates || [],
-      createdAt: existing?.createdAt || todayISO(),
+      createdAt,
     });
   };
 
@@ -2598,6 +2616,17 @@ function TaskForm({ existing, presetDate, presetCustomerId, customers, onSave, o
         <Field label="Ngày thực hiện">
           <TextInput type="date" value={date} onChange={(e) => setDate(e.target.value)} />
         </Field>
+      )}
+      {type === "daily" && (
+        <>
+          <div className="text-[11px] mb-4 flex items-center gap-1.5" style={{ color: C.sub }}>
+            <CalendarDays size={11} />
+            Bắt đầu lặp từ ngày {new Date(existing?.startDate || isoDay(new Date())).toLocaleDateString("vi-VN")} (ngày tạo), chỉ lặp về sau.
+          </div>
+          <Field label="Ngày kết thúc (không bắt buộc - để trống = lặp vô hạn)">
+            <TextInput type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} min={existing?.startDate || isoDay(new Date())} />
+          </Field>
+        </>
       )}
       <Field label={type === "daily" ? "Giờ nhắc mỗi ngày (không bắt buộc)" : "Giờ nhắc (không bắt buộc)"}>
         <TextInput type="time" value={time} onChange={(e) => setTime(e.target.value)} />
@@ -2832,9 +2861,17 @@ function ReportsTab({ quotes, customers, quoteTotal, quoteCost, onOpenQuote }) {
 
   const endOfDay = new Date(end.getFullYear(), end.getMonth(), end.getDate(), 23, 59, 59, 999);
   const matched = quotes
-    .filter((q) => (q.status === "won" || q.status === "done") && custMatches(q))
+    .filter((q) => (q.status === "won" || q.status === "done") && isRevenueRecognized(q) && custMatches(q))
     .filter((q) => { const t = new Date(revenueDate(q)); return t >= start && t <= endOfDay; })
     .sort((a, b) => new Date(revenueDate(b)) - new Date(revenueDate(a)));
+
+  // Công nợ: không lọc theo khoảng thời gian đang chọn (đây là số dư nợ hiện tại), chỉ theo bộ lọc khách hàng/nhóm
+  const [showDebtList, setShowDebtList] = useState(false);
+  const daysInDebt = (q) => (q.completedAt ? Math.max(0, Math.floor((Date.now() - new Date(q.completedAt).getTime()) / 86400000)) : 0);
+  const debtOrders = quotes
+    .filter((q) => q.paymentType === "credit" && q.status === "done" && !q.debtPaid && custMatches(q))
+    .sort((a, b) => daysInDebt(b) - daysInDebt(a));
+  const debtTotal = debtOrders.reduce((s, q) => s + quoteTotal(q), 0);
 
   const totalRevenue = matched.reduce((s, q) => s + quoteTotal(q), 0);
   const totalCost = matched.reduce((s, q) => s + quoteCost(q), 0);
@@ -2904,6 +2941,38 @@ function ReportsTab({ quotes, customers, quoteTotal, quoteCost, onOpenQuote }) {
           </optgroup>
         )}
       </select>
+
+      {debtTotal > 0 && (
+        <div className="mb-4">
+          <button
+            onClick={() => setShowDebtList(!showDebtList)}
+            className="w-full rounded-2xl p-3.5 flex items-center justify-between"
+            style={{ backgroundColor: C.redBg, border: `1px solid ${C.red}` }}
+          >
+            <div className="text-left">
+              <div className="text-[10px] font-semibold" style={{ color: C.red }}>💰 Công nợ chưa thu ({debtOrders.length} đơn)</div>
+              <div className="text-base font-bold" style={{ color: C.red }}>{money(debtTotal)}</div>
+            </div>
+            <ChevronRight size={16} color={C.red} style={{ transform: showDebtList ? "rotate(90deg)" : "none" }} />
+          </button>
+          {showDebtList && (
+            <div className="flex flex-col gap-2 mt-2.5">
+              {debtOrders.map((q) => {
+                const cust = customers.find((c) => c.id === q.customerId);
+                return (
+                  <div key={q.id} onClick={() => onOpenQuote(q.id)} className="rounded-xl p-3 flex items-center justify-between" style={{ backgroundColor: C.card, border: `1px solid ${C.border}` }}>
+                    <div>
+                      <div className="text-xs font-bold" style={{ color: C.text }}>{quoteCode(q)}</div>
+                      <div className="text-[10px] mt-0.5" style={{ color: C.sub }}>{cust?.name || "Khách lẻ"} · <span style={{ color: C.red }}>{daysInDebt(q)} ngày nợ</span></div>
+                    </div>
+                    <span className="text-xs font-bold" style={{ color: C.text }}>{money(quoteTotal(q))}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="flex gap-3 mb-3">
         <StatCard label="Doanh thu" value={money(totalRevenue)} icon={<TrendingUp size={15} color={C.green} />} tint={C.green} />
