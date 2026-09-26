@@ -84,40 +84,6 @@ const uid = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(3
    Trong app thật, main.jsx đã import gói này 1 lần để đăng ký plugin, nên window.Capacitor.Plugins.LocalNotifications sẽ có sẵn. */
 const getLocalNotif = () => (typeof window !== "undefined" ? window.Capacitor?.Plugins?.LocalNotifications : null);
 const getCapApp = () => (typeof window !== "undefined" ? window.Capacitor?.Plugins?.App : null);
-const getAdMob = () => (typeof window !== "undefined" ? window.Capacitor?.Plugins?.AdMob : null);
-
-/* ---------------------------------- QUẢNG CÁO ADMOB ----------------------------------
-   ĐANG DÙNG BANNER ID THỬ NGHIỆM CHÍNH THỨC CỦA GOOGLE (an toàn, không vi phạm chính sách khi test).
-   TRƯỚC KHI PHÁT HÀNH THẬT: thay 2 ID bên dưới bằng Ad Unit ID thật lấy từ tài khoản AdMob của bạn,
-   đồng thời đổi App ID thật trong AndroidManifest.xml (Android) và Info.plist (iOS). */
-const ADMOB_BANNER_TEST_ID = {
-  android: "ca-app-pub-3940256099942544/6300978111",
-  ios: "ca-app-pub-3940256099942544/2934735716",
-};
-async function initAndShowBannerAd() {
-  const AdMob = getAdMob();
-  if (!AdMob) return false; // Không phải app thật (vd: đang xem trong Claude) -> bỏ qua
-  try {
-    // Xin sự đồng ý hiển thị quảng cáo cá nhân hoá theo đúng quy định (GDPR/UMP) - bắt buộc với Google Play/App Store
-    await AdMob.initialize({ requestTrackingAuthorization: true, initializeForTesting: true });
-    try {
-      const { status } = await AdMob.trackingAuthorizationStatus();
-      if (status === "notDetermined") await AdMob.requestTrackingAuthorization();
-    } catch (e) {}
-    const platform = window.Capacitor?.getPlatform ? window.Capacitor.getPlatform() : "android";
-    const adId = platform === "ios" ? ADMOB_BANNER_TEST_ID.ios : ADMOB_BANNER_TEST_ID.android;
-    await AdMob.showBanner({
-      adId,
-      adSize: "ADAPTIVE_BANNER",
-      position: "TOP_CENTER",
-      margin: 0,
-      isTesting: true, // Đặt false khi đã thay Ad Unit ID thật, nếu không quảng cáo thật sẽ không hiển thị đúng cách
-    });
-    return true;
-  } catch (e) {
-    return false;
-  }
-}
 
 async function requestNotifPermission() {
   try {
@@ -534,7 +500,6 @@ export default function PersonalCRM() {
   const [systemPrefersDark, setSystemPrefersDark] = useState(false);
   const [businesses, setBusinesses] = useState([]); // [{id, name}] - các doanh nghiệp/công việc tách biệt
   const [currentBusinessId, setCurrentBusinessId] = useState(null);
-  const [adBannerShown, setAdBannerShown] = useState(false);
 
   // Chặn zoom/pinch của trình duyệt - phòng khi trang bao ngoài (Claude/webview) cho phép zoom,
   // gây hiện tượng lệch/cắt hình khi người dùng lỡ chạm 2 ngón tay. Tự ghi đè thẻ viewport ngay khi mở app.
@@ -644,7 +609,6 @@ export default function PersonalCRM() {
       setAccentTone(d.accentTone);
       setLoaded(true);
       requestNotifPermission(); // Xin quyền gửi thông báo (chỉ có tác dụng khi chạy app thật)
-      initAndShowBannerAd().then((shown) => setAdBannerShown(shown));
       // Tự đặt lịch cho các công việc đã có giờ nhắc nhưng chưa từng được đặt lịch (vd: tạo trước khi có tính năng này)
       migTasks.forEach((t) => {
         if (t.time && !t.notifId && !t.done) {
@@ -937,11 +901,9 @@ export default function PersonalCRM() {
       <div className="relative w-full h-full overflow-hidden" style={{ backgroundColor: C.bg, overflowX: "hidden", touchAction: "pan-y" }}>
         {/* Khoảng đệm an toàn phía trên (tai thỏ/status bar thật của điện thoại) */}
         <div style={{ height: "env(safe-area-inset-top, 0px)" }} />
-        {/* Chừa chỗ cho banner quảng cáo AdMob (banner là view native nổi đè lên trên, không nằm trong layout này) */}
-        {adBannerShown && <div style={{ height: 50 }} />}
 
         {/* ---------- TAB CONTENT ---------- */}
-        <div className="absolute left-0 right-0 bottom-0 flex flex-col" style={{ top: `calc(env(safe-area-inset-top, 0px) + ${adBannerShown ? 50 : 0}px)` }}>
+        <div className="absolute left-0 right-0 bottom-0 flex flex-col" style={{ top: `env(safe-area-inset-top, 0px)` }}>
           <div className="flex-1 overflow-hidden relative">
           <ErrorBoundary>
             {tab === "home" && (

@@ -27,13 +27,6 @@
             android:grantUriPermissions="true">
             <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths" />
         </provider>
-
-        <!-- AdMob App ID - ĐANG DÙNG ID THỬ NGHIỆM CHÍNH THỨC CỦA GOOGLE.
-             BẮT BUỘC thay bằng App ID thật của bạn (lấy trong AdMob Console) trước khi phát hành thật,
-             nếu không quảng cáo sẽ luôn là quảng cáo test, không sinh ra doanh thu thật. -->
-        <meta-data
-            android:name="com.google.android.gms.ads.APPLICATION_ID"
-            android:value="ca-app-pub-3940256099942544~3347511713" />
     </application>
 
     <!-- Permissions -->

@@ -7,7 +7,6 @@ import "./index.css";
 // có sẵn khi App.jsx gọi tới (App.jsx không import trực tiếp để không phá bản xem trước trong Claude).
 import "@capacitor/local-notifications";
 import "@capacitor/app";
-import "@capacitor-community/admob";
 
 ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>
