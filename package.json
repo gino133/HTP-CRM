@@ -12,6 +12,7 @@
     "ios": "vite build && npx cap sync ios && npx cap open ios"
   },
   "dependencies": {
+    "@capacitor-community/admob": "^8.0.0",
     "@capacitor/android": "^8.5.1",
     "@capacitor/app": "^8.1.1",
     "@capacitor/cli": "^8.5.1",
@@ -30,7 +31,6 @@
     "postcss": "^8.4.38",
     "tailwindcss": "^3.4.4",
     "vite": "^5.3.1",
-    "vite-plugin-pwa": "^0.20.0",
-    "typescript": "^5.0.0"
+    "vite-plugin-pwa": "^0.20.0"
   }
 }
