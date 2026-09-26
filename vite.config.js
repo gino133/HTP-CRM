@@ -12,8 +12,8 @@ export default defineConfig({
         name: "HTP CRM",
         short_name: "HTP CRM",
         description: "Quản lý khách hàng, báo giá, doanh thu & lợi nhuận",
-        theme_color: "#152A61",
-        background_color: "#152A61",
+        theme_color: "#D10310",
+        background_color: "#FFFFFF",
         display: "standalone",
         start_url: "/",
         icons: [

@@ -11,8 +11,8 @@ import {
 
 /* ---------------------------------- THEME ---------------------------------- */
 let C = {
-  navy: "#152A61",
-  navySoft: "#22397A",
+  navy: "#D10310",
+  navySoft: "#FD0410",
   bg: "#F4F5F9",
   card: "#FFFFFF",
   border: "#E6E8F0",
@@ -34,6 +34,7 @@ let C = {
 
 /* ---------------------------------- THEME (tông màu + sáng/tối) ---------------------------------- */
 const TONES = {
+  red: { label: "Đỏ (theo logo)", primary: "#D10310", soft: "#FD0410", lightBg: "#FDEAEA" },
   navy: { label: "Xanh navy", primary: "#152A61", soft: "#22397A", lightBg: "#EEF0F8" },
   blue: { label: "Xanh dương", primary: "#1D4ED8", soft: "#2F63E0", lightBg: "#E9F0FE" },
   green: { label: "Xanh lá", primary: "#0F7A48", soft: "#159A5B", lightBg: "#E7F6EE" },
@@ -308,13 +309,13 @@ async function loadAll() {
         quotes: parsed.quotes || [],
         tasks: parsed.tasks || [],
         themeMode: parsed.themeMode || "system",
-        accentTone: parsed.accentTone || "navy",
+        accentTone: parsed.accentTone || "red",
         businesses: parsed.businesses || [],
         currentBusinessId: parsed.currentBusinessId || null,
       };
     }
   } catch (e) {}
-  return { customers: [], products: [], quotes: [], tasks: [], themeMode: "system", accentTone: "navy", businesses: [], currentBusinessId: null };
+  return { customers: [], products: [], quotes: [], tasks: [], themeMode: "system", accentTone: "red", businesses: [], currentBusinessId: null };
 }
 async function saveAll(data) {
   try {
@@ -496,7 +497,7 @@ export default function PersonalCRM() {
   const [tab, setTab] = useState("home");
   const [toast, setToast] = useState("");
   const [themeMode, setThemeMode] = useState("system"); // 'light' | 'dark' | 'system'
-  const [accentTone, setAccentTone] = useState("navy");
+  const [accentTone, setAccentTone] = useState("red");
   const [systemPrefersDark, setSystemPrefersDark] = useState(false);
   const [businesses, setBusinesses] = useState([]); // [{id, name}] - các doanh nghiệp/công việc tách biệt
   const [currentBusinessId, setCurrentBusinessId] = useState(null);
