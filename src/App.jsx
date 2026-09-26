@@ -84,6 +84,40 @@ const uid = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(3
    Trong app thật, main.jsx đã import gói này 1 lần để đăng ký plugin, nên window.Capacitor.Plugins.LocalNotifications sẽ có sẵn. */
 const getLocalNotif = () => (typeof window !== "undefined" ? window.Capacitor?.Plugins?.LocalNotifications : null);
 const getCapApp = () => (typeof window !== "undefined" ? window.Capacitor?.Plugins?.App : null);
+const getAdMob = () => (typeof window !== "undefined" ? window.Capacitor?.Plugins?.AdMob : null);
+
+/* ---------------------------------- QUẢNG CÁO ADMOB ----------------------------------
+   ĐANG DÙNG BANNER ID THỬ NGHIỆM CHÍNH THỨC CỦA GOOGLE (an toàn, không vi phạm chính sách khi test).
+   TRƯỚC KHI PHÁT HÀNH THẬT: thay 2 ID bên dưới bằng Ad Unit ID thật lấy từ tài khoản AdMob của bạn,
+   đồng thời đổi App ID thật trong AndroidManifest.xml (Android) và Info.plist (iOS). */
+const ADMOB_BANNER_TEST_ID = {
+  android: "ca-app-pub-3940256099942544/6300978111",
+  ios: "ca-app-pub-3940256099942544/2934735716",
+};
+async function initAndShowBannerAd() {
+  const AdMob = getAdMob();
+  if (!AdMob) return false; // Không phải app thật (vd: đang xem trong Claude) -> bỏ qua
+  try {
+    // Xin sự đồng ý hiển thị quảng cáo cá nhân hoá theo đúng quy định (GDPR/UMP) - bắt buộc với Google Play/App Store
+    await AdMob.initialize({ requestTrackingAuthorization: true, initializeForTesting: true });
+    try {
+      const { status } = await AdMob.trackingAuthorizationStatus();
+      if (status === "notDetermined") await AdMob.requestTrackingAuthorization();
+    } catch (e) {}
+    const platform = window.Capacitor?.getPlatform ? window.Capacitor.getPlatform() : "android";
+    const adId = platform === "ios" ? ADMOB_BANNER_TEST_ID.ios : ADMOB_BANNER_TEST_ID.android;
+    await AdMob.showBanner({
+      adId,
+      adSize: "ADAPTIVE_BANNER",
+      position: "TOP_CENTER",
+      margin: 0,
+      isTesting: true, // Đặt false khi đã thay Ad Unit ID thật, nếu không quảng cáo thật sẽ không hiển thị đúng cách
+    });
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
 
 async function requestNotifPermission() {
   try {
@@ -101,6 +135,33 @@ async function cancelTaskNotification(task) {
   } catch (e) {}
 }
 
+// Tính thời điểm nhắc kế tiếp cho việc "lặp lại hằng ngày": bỏ qua các ngày đã đánh dấu hoàn thành
+// (completedDates), không lùi về trước ngày bắt đầu (startDate), và dừng hẳn nếu đã quá ngày kết thúc
+// (endDate). Trả về null nếu không còn lần nhắc nào hợp lệ (đã hoàn thành hết / đã hết hạn lặp).
+// Dùng "at" (1 thời điểm cụ thể) thay vì "on {hour,minute} + repeats:true" vì kiểu lặp theo giờ của
+// plugin thông báo có thể tự bắn thêm 1 lần ngay khi đặt lịch (gây thông báo bị đúp), đồng thời không
+// có cách nào bỏ qua riêng 1 ngày đã hoàn thành hay tự dừng đúng ngày kết thúc.
+function nextDailyOccurrence(task) {
+  if (!task.time) return null;
+  const [hh, mm] = task.time.split(":").map(Number);
+  const completed = new Set(task.completedDates || []);
+  const now = new Date();
+  let cursor = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hh, mm, 0, 0);
+  if (cursor.getTime() <= now.getTime()) cursor = new Date(cursor.getTime() + 24 * 3600 * 1000); // hôm nay đã qua giờ -> tính từ ngày mai
+  if (task.startDate) {
+    const [sy, sm, sd] = task.startDate.split("-").map(Number);
+    const start = new Date(sy, sm - 1, sd, hh, mm, 0, 0);
+    if (cursor.getTime() < start.getTime()) cursor = start;
+  }
+  const endLimit = task.endDate ? new Date(`${task.endDate}T23:59:59`) : null;
+  for (let i = 0; i < 400; i++) { // giới hạn số vòng lặp để tránh treo nếu dữ liệu bất thường
+    if (endLimit && cursor.getTime() > endLimit.getTime()) return null;
+    if (!completed.has(isoDay(cursor))) return cursor;
+    cursor = new Date(cursor.getTime() + 24 * 3600 * 1000);
+  }
+  return null;
+}
+
 // Đặt (hoặc đặt lại) lịch thông báo cho 1 công việc. Trả về notifId để lưu lại vào task.
 async function scheduleTaskNotification(task) {
   const LN = getLocalNotif();
@@ -112,19 +173,20 @@ async function scheduleTaskNotification(task) {
     }
     if (!task.time) return null; // không đặt giờ -> không nhắc, huỷ hẳn lịch cũ (trả về null)
 
-    const [hh, mm] = task.time.split(":").map(Number);
-
     if (task.type === "daily") {
+      const when = nextDailyOccurrence(task);
+      if (!when) return null; // đã hoàn thành hết các ngày còn lại hoặc đã quá ngày kết thúc -> không còn gì để nhắc
       await LN.schedule({
         notifications: [{
           id: notifId,
           title: "⏰ Nhắc việc hằng ngày",
           body: task.title,
-          schedule: { on: { hour: hh, minute: mm }, repeats: true, allowWhileIdle: true },
+          schedule: { at: when, allowWhileIdle: true },
           extra: { taskId: task.id },
         }],
       });
     } else {
+      const [hh, mm] = task.time.split(":").map(Number);
       const [y, m, d] = (task.date || isoDay(new Date())).split("-").map(Number);
       const when = new Date(y, m - 1, d, hh, mm, 0);
       if (when.getTime() <= Date.now()) return null; // giờ đã qua -> không đặt lịch
@@ -492,6 +554,7 @@ export default function PersonalCRM() {
   const [systemPrefersDark, setSystemPrefersDark] = useState(false);
   const [businesses, setBusinesses] = useState([]); // [{id, name}] - các doanh nghiệp/công việc tách biệt
   const [currentBusinessId, setCurrentBusinessId] = useState(null);
+  const [adBannerShown, setAdBannerShown] = useState(false);
 
   // Chặn zoom/pinch của trình duyệt - phòng khi trang bao ngoài (Claude/webview) cho phép zoom,
   // gây hiện tượng lệch/cắt hình khi người dùng lỡ chạm 2 ngón tay. Tự ghi đè thẻ viewport ngay khi mở app.
@@ -601,9 +664,11 @@ export default function PersonalCRM() {
       setAccentTone(d.accentTone);
       setLoaded(true);
       requestNotifPermission(); // Xin quyền gửi thông báo (chỉ có tác dụng khi chạy app thật)
-      // Tự đặt lịch cho các công việc đã có giờ nhắc nhưng chưa từng được đặt lịch (vd: tạo trước khi có tính năng này)
+      initAndShowBannerAd().then((shown) => setAdBannerShown(shown));
+      // Tự đặt lịch cho các công việc "một lần" đã có giờ nhắc nhưng chưa từng được đặt lịch
+      // (vd: tạo trước khi có tính năng này). Việc "lặp lại hằng ngày" do effect rà soát riêng bên dưới lo.
       migTasks.forEach((t) => {
-        if (t.time && !t.notifId && !t.done) {
+        if (t.type === "once" && t.time && !t.notifId && !t.done) {
           scheduleTaskNotification(t).then((notifId) => {
             if (notifId) setTasks((prev) => prev.map((x) => (x.id === t.id ? { ...x, notifId } : x)));
           });
@@ -832,8 +897,9 @@ export default function PersonalCRM() {
   // Dùng khi lưu từ màn hình Thêm/Sửa công việc - có đặt/đặt lại lịch thông báo thật
   const saveTaskWithNotification = async (t) => {
     const notifId = await scheduleTaskNotification(t);
+    const next = t.type === "daily" ? nextDailyOccurrence(t) : null;
     await cancelOverdueBatch(t); // huỷ loạt nhắc quá hạn cũ; cơ chế rà soát tự đặt lại nếu vẫn còn quá hạn
-    upsertTask({ ...t, notifId, overdueNotifIds: [], overdueNotifDate: null });
+    upsertTask({ ...t, notifId, notifScheduledFor: next ? isoDay(next) : null, overdueNotifIds: [], overdueNotifDate: null });
   };
   const deleteTask = (id) => {
     const task = tasks.find((x) => x.id === id);
@@ -871,6 +937,24 @@ export default function PersonalCRM() {
       if (t.type === "once" && !t.done && t.date && t.date < today && t.overdueNotifDate !== today) {
         scheduleOverdueBatch(t).then(({ ids, date }) => {
           setTasks((prev) => prev.map((x) => (x.id === t.id ? { ...x, overdueNotifIds: ids, overdueNotifDate: date } : x)));
+        });
+      }
+    });
+  }, [tasks, loaded]);
+
+  // Rà soát việc "lặp lại hằng ngày": tự tính lại lần nhắc kế tiếp mỗi khi có thay đổi (đổi giờ, tick
+  // hoàn thành/bỏ tick hôm nay, qua ngày mới...). Nếu lần nhắc kế tiếp khác với lần đã đặt lịch trước đó
+  // (notifScheduledFor) thì đặt lại lịch - nhờ vậy khi tick hoàn thành, thông báo của hôm nay được huỷ
+  // ngay, và không còn hiện lại sau khi đã xong việc.
+  useEffect(() => {
+    if (!loaded) return;
+    tasks.forEach((t) => {
+      if (t.type !== "daily" || !t.time) return;
+      const next = nextDailyOccurrence(t);
+      const nextIso = next ? isoDay(next) : null;
+      if (nextIso !== (t.notifScheduledFor || null)) {
+        scheduleTaskNotification(t).then((notifId) => {
+          setTasks((prev) => prev.map((x) => (x.id === t.id ? { ...x, notifId, notifScheduledFor: nextIso } : x)));
         });
       }
     });
@@ -1042,9 +1126,11 @@ export default function PersonalCRM() {
       <div className="relative w-full h-full overflow-hidden" style={{ backgroundColor: C.bg, overflowX: "hidden", touchAction: "pan-y" }}>
         {/* Khoảng đệm an toàn phía trên (tai thỏ/status bar thật của điện thoại) */}
         <div style={{ height: "env(safe-area-inset-top, 0px)" }} />
+        {/* Chừa chỗ cho banner quảng cáo AdMob (banner là view native nổi đè lên trên, không nằm trong layout này) */}
+        {adBannerShown && <div style={{ height: 50 }} />}
 
         {/* ---------- TAB CONTENT ---------- */}
-        <div className="absolute left-0 right-0 bottom-0 flex flex-col" style={{ top: "env(safe-area-inset-top, 0px)" }}>
+        <div className="absolute left-0 right-0 bottom-0 flex flex-col" style={{ top: `calc(env(safe-area-inset-top, 0px) + ${adBannerShown ? 50 : 0}px)` }}>
           <div className="flex-1 overflow-hidden relative">
           <ErrorBoundary>
             {tab === "home" && (
@@ -2564,7 +2650,8 @@ function TaskForm({ existing, presetDate, presetCustomerId, customers, onSave, o
   const [title, setTitle] = useState(existing?.title || "");
   const [type, setType] = useState(existing?.type || "once");
   const [date, setDate] = useState(existing?.date || presetDate || isoDay(new Date()));
-  const [time, setTime] = useState(existing?.time || "");
+  // Công việc mới: mặc định giờ nhắc là 8h sáng. Sửa công việc có sẵn: giữ nguyên giờ đã lưu (kể cả khi để trống).
+  const [time, setTime] = useState(existing ? (existing.time || "") : "08:00");
   const [note, setNote] = useState(existing?.note || "");
   const [customerId, setCustomerId] = useState(existing?.customerId || presetCustomerId || "");
   const [endDate, setEndDate] = useState(existing?.endDate || "");
