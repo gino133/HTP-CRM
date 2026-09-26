@@ -132,34 +132,10 @@ async function cancelTaskNotification(task) {
     const LN = getLocalNotif();
     if (!LN || !task?.notifId) return;
     await LN.cancel({ notifications: [{ id: task.notifId }] });
+    // cancel() chỉ huỷ thông báo CHƯA bắn ra. Nếu nó đã hiện trong khay thông báo rồi thì phải
+    // xoá riêng bằng removeDeliveredNotifications, nếu không nó vẫn nằm im ở đó dù đã tick xong việc.
+    await LN.removeDeliveredNotifications({ notifications: [{ id: task.notifId }] }).catch(() => {});
   } catch (e) {}
-}
-
-// Tính thời điểm nhắc kế tiếp cho việc "lặp lại hằng ngày": bỏ qua các ngày đã đánh dấu hoàn thành
-// (completedDates), không lùi về trước ngày bắt đầu (startDate), và dừng hẳn nếu đã quá ngày kết thúc
-// (endDate). Trả về null nếu không còn lần nhắc nào hợp lệ (đã hoàn thành hết / đã hết hạn lặp).
-// Dùng "at" (1 thời điểm cụ thể) thay vì "on {hour,minute} + repeats:true" vì kiểu lặp theo giờ của
-// plugin thông báo có thể tự bắn thêm 1 lần ngay khi đặt lịch (gây thông báo bị đúp), đồng thời không
-// có cách nào bỏ qua riêng 1 ngày đã hoàn thành hay tự dừng đúng ngày kết thúc.
-function nextDailyOccurrence(task) {
-  if (!task.time) return null;
-  const [hh, mm] = task.time.split(":").map(Number);
-  const completed = new Set(task.completedDates || []);
-  const now = new Date();
-  let cursor = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hh, mm, 0, 0);
-  if (cursor.getTime() <= now.getTime()) cursor = new Date(cursor.getTime() + 24 * 3600 * 1000); // hôm nay đã qua giờ -> tính từ ngày mai
-  if (task.startDate) {
-    const [sy, sm, sd] = task.startDate.split("-").map(Number);
-    const start = new Date(sy, sm - 1, sd, hh, mm, 0, 0);
-    if (cursor.getTime() < start.getTime()) cursor = start;
-  }
-  const endLimit = task.endDate ? new Date(`${task.endDate}T23:59:59`) : null;
-  for (let i = 0; i < 400; i++) { // giới hạn số vòng lặp để tránh treo nếu dữ liệu bất thường
-    if (endLimit && cursor.getTime() > endLimit.getTime()) return null;
-    if (!completed.has(isoDay(cursor))) return cursor;
-    cursor = new Date(cursor.getTime() + 24 * 3600 * 1000);
-  }
-  return null;
 }
 
 // Đặt (hoặc đặt lại) lịch thông báo cho 1 công việc. Trả về notifId để lưu lại vào task.
@@ -173,20 +149,19 @@ async function scheduleTaskNotification(task) {
     }
     if (!task.time) return null; // không đặt giờ -> không nhắc, huỷ hẳn lịch cũ (trả về null)
 
+    const [hh, mm] = task.time.split(":").map(Number);
+
     if (task.type === "daily") {
-      const when = nextDailyOccurrence(task);
-      if (!when) return null; // đã hoàn thành hết các ngày còn lại hoặc đã quá ngày kết thúc -> không còn gì để nhắc
       await LN.schedule({
         notifications: [{
           id: notifId,
           title: "⏰ Nhắc việc hằng ngày",
           body: task.title,
-          schedule: { at: when, allowWhileIdle: true },
+          schedule: { on: { hour: hh, minute: mm }, repeats: true, allowWhileIdle: true },
           extra: { taskId: task.id },
         }],
       });
     } else {
-      const [hh, mm] = task.time.split(":").map(Number);
       const [y, m, d] = (task.date || isoDay(new Date())).split("-").map(Number);
       const when = new Date(y, m - 1, d, hh, mm, 0);
       if (when.getTime() <= Date.now()) return null; // giờ đã qua -> không đặt lịch
@@ -251,7 +226,10 @@ async function cancelOverdueBatch(task) {
   try {
     const LN = getLocalNotif();
     if (!LN || !task?.overdueNotifIds?.length) return;
-    await LN.cancel({ notifications: task.overdueNotifIds.map((id) => ({ id })) });
+    const ids = task.overdueNotifIds.map((id) => ({ id }));
+    await LN.cancel({ notifications: ids });
+    // Cùng lý do như trên: những thông báo quá hạn đã bắn ra trong ngày cũng phải xoá riêng khỏi khay.
+    await LN.removeDeliveredNotifications({ notifications: ids }).catch(() => {});
   } catch (e) {}
 }
 
@@ -306,7 +284,9 @@ async function cancelDebtNotifs(quote) {
     const LN = getLocalNotif();
     const ids = [quote?.debtWeekBeforeNotifId, quote?.debtOverdueNotifId].filter(Boolean);
     if (!LN || !ids.length) return;
-    await LN.cancel({ notifications: ids.map((id) => ({ id })) });
+    const targets = ids.map((id) => ({ id }));
+    await LN.cancel({ notifications: targets });
+    await LN.removeDeliveredNotifications({ notifications: targets }).catch(() => {});
   } catch (e) {}
 }
 
@@ -665,10 +645,9 @@ export default function PersonalCRM() {
       setLoaded(true);
       requestNotifPermission(); // Xin quyền gửi thông báo (chỉ có tác dụng khi chạy app thật)
       initAndShowBannerAd().then((shown) => setAdBannerShown(shown));
-      // Tự đặt lịch cho các công việc "một lần" đã có giờ nhắc nhưng chưa từng được đặt lịch
-      // (vd: tạo trước khi có tính năng này). Việc "lặp lại hằng ngày" do effect rà soát riêng bên dưới lo.
+      // Tự đặt lịch cho các công việc đã có giờ nhắc nhưng chưa từng được đặt lịch (vd: tạo trước khi có tính năng này)
       migTasks.forEach((t) => {
-        if (t.type === "once" && t.time && !t.notifId && !t.done) {
+        if (t.time && !t.notifId && !t.done) {
           scheduleTaskNotification(t).then((notifId) => {
             if (notifId) setTasks((prev) => prev.map((x) => (x.id === t.id ? { ...x, notifId } : x)));
           });
@@ -897,9 +876,8 @@ export default function PersonalCRM() {
   // Dùng khi lưu từ màn hình Thêm/Sửa công việc - có đặt/đặt lại lịch thông báo thật
   const saveTaskWithNotification = async (t) => {
     const notifId = await scheduleTaskNotification(t);
-    const next = t.type === "daily" ? nextDailyOccurrence(t) : null;
     await cancelOverdueBatch(t); // huỷ loạt nhắc quá hạn cũ; cơ chế rà soát tự đặt lại nếu vẫn còn quá hạn
-    upsertTask({ ...t, notifId, notifScheduledFor: next ? isoDay(next) : null, overdueNotifIds: [], overdueNotifDate: null });
+    upsertTask({ ...t, notifId, overdueNotifIds: [], overdueNotifDate: null });
   };
   const deleteTask = (id) => {
     const task = tasks.find((x) => x.id === id);
@@ -942,173 +920,6 @@ export default function PersonalCRM() {
     });
   }, [tasks, loaded]);
 
-  // Rà soát việc "lặp lại hằng ngày": tự tính lại lần nhắc kế tiếp mỗi khi có thay đổi (đổi giờ, tick
-  // hoàn thành/bỏ tick hôm nay, qua ngày mới...). Nếu lần nhắc kế tiếp khác với lần đã đặt lịch trước đó
-  // (notifScheduledFor) thì đặt lại lịch - nhờ vậy khi tick hoàn thành, thông báo của hôm nay được huỷ
-  // ngay, và không còn hiện lại sau khi đã xong việc.
-  useEffect(() => {
-    if (!loaded) return;
-    tasks.forEach((t) => {
-      if (t.type !== "daily" || !t.time) return;
-      const next = nextDailyOccurrence(t);
-      const nextIso = next ? isoDay(next) : null;
-      if (nextIso !== (t.notifScheduledFor || null)) {
-        scheduleTaskNotification(t).then((notifId) => {
-          setTasks((prev) => prev.map((x) => (x.id === t.id ? { ...x, notifId, notifScheduledFor: nextIso } : x)));
-        });
-      }
-    });
-  }, [tasks, loaded]);
-
-  // Tạo bộ dữ liệu mẫu (khách hàng, sản phẩm, báo giá/đơn hàng trải vài tháng, công việc) để xem trực quan
-  const seedDemoData = () => {
-    const now = new Date();
-    const daysAgo = (n) => { const d = new Date(now); d.setDate(d.getDate() - n); return d; };
-    const rand = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
-    const pick = (arr) => arr[rand(0, arr.length - 1)];
-
-    // ---------- 50 khách hàng ----------
-    const surnames = ["Nguyễn", "Trần", "Lê", "Phạm", "Hoàng", "Huỳnh", "Phan", "Vũ", "Võ", "Đặng", "Bùi", "Đỗ", "Hồ", "Ngô", "Dương"];
-    const givenNames = ["Minh", "Hương", "Tuấn", "Lan", "Hùng", "Thảo", "Đức", "Trang", "Long", "Nga", "Sơn", "Hà", "Tâm", "Phong", "Linh", "Nam", "An", "Quân", "Yến", "Bình", "Kiên", "Vy", "Đạt", "Ngọc", "Khang"];
-    const bizSuffix = ["Decal Auto", "Gara", "Cửa hàng Xe Máy", "PPF Studio", "Detailing Center", "Auto Care", "Garage Ô tô"];
-    const areas = ["Q1", "Q3", "Q7", "Q9", "Q10", "Bình Thạnh", "Gò Vấp", "Tân Bình", "Thủ Đức", "Q12"];
-    const groupsPool = ["VIP", "Đại lý", "Đại lý", "Khách lẻ", "Khách lẻ", "Khách lẻ", "Khách mới"];
-
-    const newCustomers = Array.from({ length: 50 }, () => {
-      const given = pick(givenNames);
-      const isBiz = Math.random() < 0.5;
-      const name = isBiz
-        ? `${Math.random() < 0.5 ? "Anh" : "Chị"} ${given} - ${pick(bizSuffix)} ${pick(areas)}`
-        : `${Math.random() < 0.5 ? "Anh" : "Chị"} ${given} ${pick(surnames)}`;
-      return {
-        id: uid(),
-        name,
-        phone: `09${rand(10000000, 99999999)}`,
-        email: Math.random() < 0.4 ? `${given.toLowerCase()}${rand(1, 999)}@gmail.com` : "",
-        address: Math.random() < 0.6 ? `${rand(1, 200)} ${pick(["Nguyễn Văn Linh", "Lê Văn Việt", "Cách Mạng Tháng 8", "Điện Biên Phủ", "Quang Trung"])}, ${pick(areas)}, TP.HCM` : "",
-        group: pick(groupsPool),
-        note: "",
-      };
-    });
-
-    // ---------- 50 sản phẩm ----------
-    const baseProducts = [
-      { name: "Decal PPF bóng", unit: "m2", cost: 180000, sell: 280000 },
-      { name: "Decal PPF nhám", unit: "m2", cost: 210000, sell: 320000 },
-      { name: "Decal PPF màu", unit: "m2", cost: 230000, sell: 350000 },
-      { name: "Decal carbon 5D", unit: "m2", cost: 150000, sell: 240000 },
-      { name: "Decal carbon 3D", unit: "m2", cost: 140000, sell: 220000 },
-      { name: "Phim cách nhiệt 2 lớp", unit: "m2", cost: 250000, sell: 380000 },
-      { name: "Phim cách nhiệt 3 lớp", unit: "m2", cost: 320000, sell: 480000 },
-      { name: "Phim cách nhiệt Ceramic", unit: "m2", cost: 420000, sell: 650000 },
-      { name: "Tem xe máy full bộ", unit: "bộ", cost: 450000, sell: 750000 },
-      { name: "Tem xe máy nửa bộ", unit: "bộ", cost: 250000, sell: 420000 },
-      { name: "Decal trang trí ô tô", unit: "cái", cost: 80000, sell: 150000 },
-      { name: "Decal logo hãng", unit: "cái", cost: 60000, sell: 120000 },
-      { name: "Wrap đổi màu toàn xe", unit: "xe", cost: 8000000, sell: 14000000 },
-      { name: "Dán PPF đèn xe", unit: "cái", cost: 120000, sell: 220000 },
-      { name: "Phủ ceramic sơn xe", unit: "xe", cost: 1500000, sell: 2800000 },
-    ];
-    const variants = ["khổ 1.0m", "khổ 1.22m", "khổ 1.52m", "khổ 1.83m", "loại thường", "loại cao cấp"];
-    const newProducts = [];
-    outer: for (const bp of baseProducts) {
-      for (const v of variants) {
-        if (newProducts.length >= 50) break outer;
-        const jitter = () => 1 + (rand(-8, 12) / 100);
-        newProducts.push({
-          id: uid(),
-          name: `${bp.name} - ${v}`,
-          unit: bp.unit,
-          costPrice: Math.round((bp.cost * jitter()) / 1000) * 1000,
-          sellPrice: Math.round((bp.sell * jitter()) / 1000) * 1000,
-          priceHistory: Math.random() < 0.15 ? [{ costPrice: Math.round(bp.cost * 0.9 / 1000) * 1000, sellPrice: Math.round(bp.sell * 0.9 / 1000) * 1000, changedAt: daysAgo(rand(60, 200)).toISOString() }] : [],
-        });
-      }
-    }
-
-    const mkItem = (p, qty) => ({ productId: p.id, name: p.name, unit: p.unit, qty, unitPrice: p.sellPrice, unitCost: p.costPrice });
-
-    // ---------- 150 báo giá (100 trong số đó trở thành đơn hàng Hoàn thành) ----------
-    // Phân bổ trạng thái: 100 hoàn thành, 20 đã chốt đang thực hiện, 15 đã gửi, 10 nháp, 5 từ chối
-    const statusPlan = [
-      ...Array(100).fill("done"),
-      ...Array(20).fill("won"),
-      ...Array(15).fill("sent"),
-      ...Array(10).fill("draft"),
-      ...Array(5).fill("lost"),
-    ];
-    // Trộn ngẫu nhiên để ngày tháng không bị dồn theo nhóm trạng thái
-    for (let i = statusPlan.length - 1; i > 0; i--) {
-      const j = rand(0, i);
-      [statusPlan[i], statusPlan[j]] = [statusPlan[j], statusPlan[i]];
-    }
-
-    let yearCounters = {};
-    const nextCode = (createdAt) => {
-      const y = new Date(createdAt).getFullYear();
-      yearCounters[y] = (yearCounters[y] || 0) + 1;
-      return `BG/${y}-${String(yearCounters[y]).padStart(3, "0")}`;
-    };
-
-    const newQuotes = statusPlan.map((status) => {
-      // Trải báo giá trong ~14 tháng gần đây (đủ dữ liệu để lọc theo Quý/Năm), sắp theo thời gian tăng dần khi sinh mã
-      const createdDaysAgo = rand(1, 420);
-      const createdAt = daysAgo(createdDaysAgo);
-      const cust = pick(newCustomers);
-      const itemCount = rand(1, 3);
-      const usedProducts = new Set();
-      const items = [];
-      for (let i = 0; i < itemCount; i++) {
-        let p = pick(newProducts);
-        let guard = 0;
-        while (usedProducts.has(p.id) && guard < 10) { p = pick(newProducts); guard++; }
-        usedProducts.add(p.id);
-        items.push(mkItem(p, rand(1, 30)));
-      }
-
-      let progress = 0, completedAt = null;
-      if (status === "done") {
-        progress = 100;
-        // Ngày hoàn thành thực tế PHẢI sau ngày tạo báo giá vài ngày đến vài tuần, không được trùng
-        const completeDaysAfter = rand(2, 21);
-        const cDate = new Date(createdAt);
-        cDate.setDate(cDate.getDate() + Math.min(completeDaysAfter, createdDaysAgo - 1 >= 0 ? createdDaysAgo : completeDaysAfter));
-        // Đảm bảo completedAt không vượt quá hiện tại
-        completedAt = (cDate > now ? now : cDate).toISOString();
-      } else if (status === "won") {
-        progress = pick([10, 20, 30, 40, 50, 60, 70, 80, 90]);
-      }
-
-      return {
-        id: uid(),
-        code: nextCode(createdAt),
-        revision: 0,
-        history: [],
-        customerId: cust.id,
-        createdAt: createdAt.toISOString(),
-        status,
-        progress,
-        completedAt,
-        items,
-        note: "",
-      };
-    });
-
-    const newTasks = [
-      { id: uid(), title: "Gọi điện xác nhận đơn hàng", type: "once", date: isoDay(now), time: "09:00", note: "Xác nhận số lượng trước khi giao", done: false, completedDates: [], createdAt: todayISO() },
-      { id: uid(), title: "Giao hàng cho khách", type: "once", date: isoDay(now), time: "14:00", note: "", done: false, completedDates: [], createdAt: todayISO() },
-      { id: uid(), title: "Kiểm tra kho vật tư", type: "daily", time: "08:00", note: "", done: false, completedDates: [isoDay(addDays(now, -1))], createdAt: todayISO() },
-      { id: uid(), title: "Chốt sổ thu chi cuối ngày", type: "daily", time: "20:00", note: "", done: false, completedDates: [], createdAt: todayISO() },
-      { id: uid(), title: "Liên hệ lại khách hàng chờ báo giá", type: "once", date: isoDay(addDays(now, 1)), time: "10:30", note: "", done: false, completedDates: [], createdAt: todayISO() },
-    ];
-
-    setCustomers((prev) => [...prev, ...newCustomers.map((x) => ({ ...x, businessId: currentBusinessId }))]);
-    setProducts((prev) => [...prev, ...newProducts.map((x) => ({ ...x, businessId: currentBusinessId }))]);
-    setQuotes((prev) => [...prev, ...newQuotes.map((x) => ({ ...x, businessId: currentBusinessId }))]);
-    setTasks((prev) => [...prev, ...newTasks.map((x) => ({ ...x, businessId: currentBusinessId }))]);
-    showToast(`Đã tạo ${newCustomers.length} khách hàng, ${newProducts.length} sản phẩm, ${newQuotes.length} báo giá`);
-  };
-
   /* ================================================================== RENDER ================================================================== */
   return (
     <div
@@ -1150,7 +961,6 @@ export default function PersonalCRM() {
                 onToggleTask={(t) => toggleTaskDone(t, todayIso)}
                 onGoTasks={() => goTab("tasks")}
                 onGoQuotes={goToQuotes}
-                onSeedDemo={seedDemoData}
                 onOpenSettings={() => openScreen({ type: "settings" })}
                 businesses={businesses}
                 currentBusinessId={currentBusinessId}
@@ -1428,9 +1238,8 @@ function TabBtn({ icon: Icon, label, active, onClick }) {
 }
 
 /* ---------------------------------- HOME TAB ---------------------------------- */
-function HomeTab({ monthRevenue, monthProfit, pendingCount, inProgress, quoteTotal, customers, quotes, onOpenQuote, onNewQuote, onOpenReports, todayTasks, pendingTodayCount, onToggleTask, onGoTasks, onGoQuotes, onSeedDemo, onOpenSettings, businesses, currentBusinessId, onOpenBusinessSwitch }) {
+function HomeTab({ monthRevenue, monthProfit, pendingCount, inProgress, quoteTotal, customers, quotes, onOpenQuote, onNewQuote, onOpenReports, todayTasks, pendingTodayCount, onToggleTask, onGoTasks, onGoQuotes, onOpenSettings, businesses, currentBusinessId, onOpenBusinessSwitch }) {
   const recent = [...quotes].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 5);
-  const isEmpty = customers.length === 0 && quotes.length === 0;
   const currentBiz = businesses?.find((b) => b.id === currentBusinessId);
   return (
     <div className="h-full overflow-y-auto px-5 pb-6">
@@ -1464,20 +1273,6 @@ function HomeTab({ monthRevenue, monthProfit, pendingCount, inProgress, quoteTot
         </button>
       )}
 
-
-      {isEmpty && (
-        <button
-          onClick={onSeedDemo}
-          className="w-full rounded-2xl p-3.5 mb-5 flex items-center justify-between"
-          style={{ backgroundColor: C.blueBg, border: `1px dashed ${C.blue}` }}
-        >
-          <div className="text-left">
-            <div className="text-xs font-bold" style={{ color: C.navy }}>Xem trực quan hơn?</div>
-            <div className="text-[11px] mt-0.5" style={{ color: C.sub }}>Tạo dữ liệu mẫu: khách hàng, sản phẩm, báo giá, công việc</div>
-          </div>
-          <span className="text-xs font-bold px-3 py-1.5 rounded-full text-white" style={{ backgroundColor: C.blue }}>Tạo ngay</span>
-        </button>
-      )}
 
       <div className="flex gap-3 mb-3">
         <StatCard label="Doanh thu tháng" value={money(monthRevenue)} icon={<TrendingUp size={15} color={C.green} />} tint={C.green} onClick={onOpenReports} />
@@ -2650,7 +2445,8 @@ function TaskForm({ existing, presetDate, presetCustomerId, customers, onSave, o
   const [title, setTitle] = useState(existing?.title || "");
   const [type, setType] = useState(existing?.type || "once");
   const [date, setDate] = useState(existing?.date || presetDate || isoDay(new Date()));
-  // Công việc mới: mặc định giờ nhắc là 8h sáng. Sửa công việc có sẵn: giữ nguyên giờ đã lưu (kể cả khi để trống).
+  // Việc MỚI tạo (chưa có `existing`) mặc định giờ nhắc là 8h sáng; việc đã có sẵn thì giữ nguyên giờ cũ
+  // (kể cả khi giờ cũ để trống - không tự ý gán 8h cho việc đã tồn tại).
   const [time, setTime] = useState(existing ? (existing.time || "") : "08:00");
   const [note, setNote] = useState(existing?.note || "");
   const [customerId, setCustomerId] = useState(existing?.customerId || presetCustomerId || "");
